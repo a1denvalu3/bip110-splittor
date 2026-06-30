@@ -1,0 +1,1 @@
+{"scryptBase":"artifacts","bindings":[{"symbol":"Bip110ClaimLeaf","path":"Bip110ClaimLeaf.scrypt"},{"symbol":"Bip110RefundLeaf","path":"Bip110RefundLeaf.scrypt"},{"symbol":"SplitContract","path":"SplitContract.scrypt"}]}
