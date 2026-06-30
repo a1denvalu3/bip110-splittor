@@ -6,7 +6,8 @@
   "scripts": {
     "test": "mocha -r ts-node/register tests/**/*.test.ts",
     "test:split": "npx ts-node tests/regtest-split-primitive.ts",
-    "test:swap": "npx ts-node tests/regtest-full-swap.ts"
+    "test:swap": "npx ts-node tests/regtest-full-swap.ts",
+    "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts"
   },
   "keywords": [],
   "author": "",

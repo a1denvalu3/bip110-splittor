@@ -88,6 +88,12 @@ Simulates the entire swap end-to-end: double-sided splitting, double-sided HTLC 
 npm run test:swap
 ```
 
+#### 3. Swap Failure & Refund Test
+Verifies all failure modes under real consensus rules: rejects claims with incorrect preimages, rejects premature refund spends, and successfully executes timelock-expired refund spends using the `RefundLeaf` scriptpath:
+```bash
+npm run test:refund
+```
+
 ---
 
 ## References

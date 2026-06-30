@@ -300,4 +300,67 @@ export class PureBitcoinSwap {
 
         return tx;
     }
+
+    /**
+     * Builds and signs an HTLC refund transaction spending via the RefundLeaf scriptpath.
+     */
+    static buildHtlcRefundTx(
+        refundKeyPair: ECPairInterface,
+        htlcFundTxid: string,
+        outputIndex: number,
+        inputSats: bigint,
+        outputSats: bigint,
+        refundDestAddr: string,
+        hashLock: Buffer,
+        recipientPubKey: Buffer,
+        htlcPayment: bitcoin.payments.Payment,
+        internalPubKey: Buffer,
+        lockTime: number,
+        network: bitcoin.Network = bitcoin.networks.regtest
+    ): bitcoin.Transaction {
+        const tx = new bitcoin.Transaction();
+        tx.version = 2;
+        
+        // nLockTime MUST be set on the transaction for OP_CHECKLOCKTIMEVERIFY to pass!
+        tx.locktime = lockTime;
+        
+        tx.addInput(Buffer.from(htlcFundTxid, 'hex').reverse(), outputIndex);
+        tx.addOutput(bitcoin.address.toOutputScript(refundDestAddr, network), outputSats);
+
+        // Inputs must set sequence to less than 0xffffffff for locktime to be enabled!
+        tx.ins[0].sequence = 0xfffffffe;
+
+        const refundScript = this.createHtlcRefundScript(Buffer.from(refundKeyPair.publicKey), lockTime);
+        const leafHash = this.tapleafHash(refundScript);
+
+        const sighash = tx.hashForWitnessV1(
+            0, [htlcPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
+        );
+        const sig = Buffer.from(refundKeyPair.signSchnorr(sighash));
+
+        // Reconstruct scriptTree to get correct control block
+        const claimScript = this.createHtlcClaimScript(hashLock, recipientPubKey);
+        const claimLeafInfo = { output: claimScript };
+        const refundLeafInfo = { output: refundScript };
+
+        const refundPayment = bitcoin.payments.p2tr({
+            internalPubkey: this.getXOnlyPubKey(internalPubKey),
+            scriptTree: [claimLeafInfo, refundLeafInfo] as any,
+            redeem: {
+                output: refundScript,
+                redeemVersion: 0xc0
+            },
+            network
+        });
+
+        const controlBlock = refundPayment.witness![1];
+
+        tx.setWitness(0, [
+            sig,
+            refundScript,
+            controlBlock
+        ]);
+
+        return tx;
+    }
 }
