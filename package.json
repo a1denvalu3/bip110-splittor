@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "mocha -r ts-node/register tests/**/*.test.ts"
+    "test": "mocha -r ts-node/register tests/**/*.test.ts",
+    "test:split": "npx ts-node tests/regtest-split-primitive.ts",
+    "test:swap": "npx ts-node tests/regtest-full-swap.ts"
   },
   "keywords": [],
   "author": "",
