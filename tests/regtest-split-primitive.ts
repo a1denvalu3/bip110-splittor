@@ -114,7 +114,7 @@ async function runSplitPrimitiveTest() {
     console.log(`   - Main Height: ${heightMain}, BIP110 Height: ${heightBip110}`);
 
     // 4. Create and Fund Split Output (Block 101)
-    console.log("\n4. Funding the Split output with 10 BTC...");
+    console.log("\n4. Funding the Split outputs for Initiator and Acceptor with 10 BTC each...");
     const initiator = PureBitcoinSwap.generateKeyPair();
     const splitScript = PureBitcoinSwap.createSplitScript(Buffer.from(initiator.publicKey));
 
@@ -128,12 +128,29 @@ async function runSplitPrimitiveTest() {
         network: bitcoin.networks.regtest
     });
     const splitAddress = splitPayment.address!;
-    console.log(`   - Split Contract Address: ${splitAddress}`);
+    console.log(`   - Initiator Split Contract Address: ${splitAddress}`);
+
+    const acceptor = PureBitcoinSwap.generateKeyPair();
+    const accSplitScript = PureBitcoinSwap.createSplitScript(Buffer.from(acceptor.publicKey));
+
+    const accSplitPayment = bitcoin.payments.p2tr({
+        internalPubkey: PureBitcoinSwap.getXOnlyPubKey(Buffer.from(acceptor.publicKey)),
+        scriptTree: { output: accSplitScript },
+        redeem: {
+            output: accSplitScript,
+            redeemVersion: 0xc0
+        },
+        network: bitcoin.networks.regtest
+    });
+    const accSplitAddress = accSplitPayment.address!;
+    console.log(`   - Acceptor Split Contract Address : ${accSplitAddress}`);
 
     const fundTxid = await mainRpc.call('sendtoaddress', [splitAddress, 10.0]);
+    const accFundTxid = await mainRpc.call('sendtoaddress', [accSplitAddress, 10.0]);
     await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
     await sleep(1000); // sync
-    console.log(`   - Block 101 Mined. Funding TxID: ${fundTxid}`);
+    console.log(`   - Block 101 Mined. Initiator Fund TxID: ${fundTxid}`);
+    console.log(`   - Block 101 Mined. Acceptor Fund TxID : ${accFundTxid}`);
 
     // 5. Trigger fork split by disconnecting nodes
     console.log("\n5. Disconnecting nodes to trigger network split...");
@@ -142,8 +159,10 @@ async function runSplitPrimitiveTest() {
         console.log("   - Nodes successfully severed.");
     } catch {}
 
-    // 6. Main Chain: Execute Scriptpath spend using OP_IF
-    console.log("\n6. Executing OP_IF Scriptpath spend on Main-Chain...");
+    // 6. Main Chain: Execute Scriptpath spends using OP_IF
+    console.log("\n6. Executing OP_IF Scriptpath spends on Main-Chain...");
+    
+    // Initiator Main Chain spend
     const rawFundTx = await mainRpc.call('getrawtransaction', [fundTxid, true]);
     let outputIndex = -1;
     const targetScriptHex = Buffer.from(splitPayment.output!).toString('hex');
@@ -153,7 +172,7 @@ async function runSplitPrimitiveTest() {
             break;
         }
     }
-    if (outputIndex === -1) throw new Error("Could not find funding output index.");
+    if (outputIndex === -1) throw new Error("Could not find Initiator funding output index.");
 
     const mainSpendTx = new bitcoin.Transaction();
     mainSpendTx.version = 2;
@@ -182,22 +201,77 @@ async function runSplitPrimitiveTest() {
 
     const rawMainHex = mainSpendTx.toHex();
     const splitTxidMain = await mainRpc.call('sendrawtransaction', [rawMainHex]);
-    console.log(`   - Broadcast accepted on Main-Chain! TxID: ${splitTxidMain}`);
+    console.log(`   - Initiator split accepted on Main-Chain! TxID: ${splitTxidMain}`);
+
+    // Acceptor Main Chain spend
+    const rawAccFundTx = await mainRpc.call('getrawtransaction', [accFundTxid, true]);
+    let accOutputIndex = -1;
+    const accTargetScriptHex = Buffer.from(accSplitPayment.output!).toString('hex');
+    for (let i = 0; i < rawAccFundTx.vout.length; i++) {
+        if (rawAccFundTx.vout[i].scriptPubKey.hex === accTargetScriptHex) {
+            accOutputIndex = i;
+            break;
+        }
+    }
+    if (accOutputIndex === -1) throw new Error("Could not find Acceptor funding output index.");
+
+    const accMainSpendTx = new bitcoin.Transaction();
+    accMainSpendTx.version = 2;
+    accMainSpendTx.addInput(Buffer.from(accFundTxid, 'hex').reverse(), accOutputIndex);
+
+    const accReceiverAddrMain = await mainRpc.call('getnewaddress');
+    accMainSpendTx.addOutput(bitcoin.address.toOutputScript(accReceiverAddrMain, bitcoin.networks.regtest), 999000000n);
+
+    const accLeafHash = tapleafHash(accSplitScript);
+    const accSighashMain = accMainSpendTx.hashForWitnessV1(
+        0,
+        [accSplitPayment.output!],
+        [1000000000n],
+        bitcoin.Transaction.SIGHASH_DEFAULT,
+        accLeafHash
+    );
+    const accSigMain = Buffer.from(acceptor.signSchnorr(accSighashMain));
+    const accControlBlock = accSplitPayment.witness![1];
+
+    accMainSpendTx.setWitness(0, [
+        accSigMain,
+        Buffer.alloc(0), // isBip110 = false
+        accSplitScript,
+        accControlBlock
+    ]);
+
+    const rawAccMainHex = accMainSpendTx.toHex();
+    const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [rawAccMainHex]);
+    console.log(`   - Acceptor split accepted on Main-Chain! TxID: ${accSplitTxidMain}`);
+
     await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
 
-    // 7. Replay Verification: BIP110 MUST reject the Main Chain spend
-    console.log("\n7. Replaying Main Chain spend to BIP110 Node (Should FAIL)...");
+    // 7. Replay Verification: BIP110 MUST reject the Main Chain spends (both should fail)
+    console.log("\n7. Replaying Main Chain spends to BIP110 Node (Should FAIL)...");
+    
+    // Attempt Initiator replay
     try {
         await bip110Rpc.call('sendrawtransaction', [rawMainHex]);
-        console.error("❌ FAILURE: BIP110 Node accepted the OP_IF spend!");
+        console.error("❌ FAILURE: BIP110 Node accepted the Initiator's OP_IF spend!");
         process.exit(1);
     } catch {
-        console.log("   - BIP110 Node successfully REJECTED the transaction!");
-        console.log("   - REPLAY PROTECTION VALIDATED SUCCESSFULLY!");
+        console.log("   - BIP110 Node successfully REJECTED Initiator's OP_IF transaction!");
     }
 
+    // Attempt Acceptor replay
+    try {
+        await bip110Rpc.call('sendrawtransaction', [rawAccMainHex]);
+        console.error("❌ FAILURE: BIP110 Node accepted the Acceptor's OP_IF spend!");
+        process.exit(1);
+    } catch {
+        console.log("   - BIP110 Node successfully REJECTED Acceptor's OP_IF transaction!");
+    }
+    console.log("   - REPLAY PROTECTION VALIDATED FOR BOTH SIDES SUCCESSFULLY!");
+
     // 8. BIP110 Chain: Spend via Keypath using Tweaked Key (Schnorr)
-    console.log("\n8. Executing Keypath spend on BIP110-Chain...");
+    console.log("\n8. Executing Keypath spends on BIP110-Chain...");
+
+    // Initiator BIP110 Keypath spend
     const bip110SpendTx = new bitcoin.Transaction();
     bip110SpendTx.version = 2;
     bip110SpendTx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
@@ -223,7 +297,36 @@ async function runSplitPrimitiveTest() {
     bip110SpendTx.setWitness(0, [sigBip110]);
 
     const splitTxidBip110 = await bip110Rpc.call('sendrawtransaction', [bip110SpendTx.toHex()]);
-    console.log(`   - Broadcast accepted on BIP110-Chain! TxID: ${splitTxidBip110}`);
+    console.log(`   - Initiator keypath split accepted on BIP110-Chain! TxID: ${splitTxidBip110}`);
+
+
+    // Acceptor BIP110 Keypath spend
+    const accBip110SpendTx = new bitcoin.Transaction();
+    accBip110SpendTx.version = 2;
+    accBip110SpendTx.addInput(Buffer.from(accFundTxid, 'hex').reverse(), accOutputIndex);
+
+    const accReceiverAddrBip110 = await bip110Rpc.call('getnewaddress');
+    accBip110SpendTx.addOutput(bitcoin.address.toOutputScript(accReceiverAddrBip110, bitcoin.networks.regtest), 999000000n);
+
+    // Calculate Taproot Keypath sighash
+    const accSighashBip110 = accBip110SpendTx.hashForWitnessV1(
+        0,
+        [accSplitPayment.output!],
+        [1000000000n],
+        bitcoin.Transaction.SIGHASH_DEFAULT
+    );
+
+    // Calculate mathematically perfect tweaked keypair (handling parity)
+    const accTweakedKeyPair = getTweakedKeyPair(acceptor, accLeafHash);
+
+    // Sign using tweaked key
+    const accSigBip110 = Buffer.from(accTweakedKeyPair.signSchnorr(accSighashBip110));
+
+    // Witness Stack for Keypath spend contains ONLY the signature!
+    accBip110SpendTx.setWitness(0, [accSigBip110]);
+
+    const accSplitTxidBip110 = await bip110Rpc.call('sendrawtransaction', [accBip110SpendTx.toHex()]);
+    console.log(`   - Acceptor keypath split accepted on BIP110-Chain! TxID: ${accSplitTxidBip110}`);
 
     const minerAddrBip110 = await bip110Rpc.call('getnewaddress');
     await bip110Rpc.call('generatetoaddress', [1, minerAddrBip110]);
