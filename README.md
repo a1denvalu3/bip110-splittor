@@ -1,6 +1,6 @@
-# Double-Sided Replay-Protected Atomic Swap Across a Hard Fork (BIP110 compliant)
+# Double-Sided Replay-Protected Atomic Swap Across a Hard Fork
 
-A double-sided, replay-protected atomic swap protocol designed to operate safely across a hard fork using pure, hyper-optimized Taproot MAST script leaves. This implementation strictly avoids conditional branching opcodes in its HTLC script leaves to fully comply with the [BIP110 opcode ban](https://gist.github.com/a1denvalu3/7641b514bdb3b9de1b0f87a96c19cbf4), providing a robust, lightweight, and framework-free atomic swap engine using raw `bitcoinjs-lib` and `tiny-secp256k1`.
+A double-sided, replay-protected atomic swap protocol designed to operate safely across a hard fork using pure, hyper-optimized Taproot MAST script leaves. This implementation is based on the [Double-Sided Replay-Protected Atomic Swap across BIP110 Hard Fork Gist](https://gist.github.com/a1denvalu3/7641b514bdb3b9de1b0f87a96c19cbf4), which formalizes the exact cryptographic splitting and swap scheme implemented here. It strictly avoids conditional branching opcodes in its HTLC script leaves to fully comply with the BIP110 opcode ban, providing a robust, lightweight, and framework-free atomic swap engine using raw `bitcoinjs-lib` and `tiny-secp256k1`.
 
 ---
 
@@ -92,5 +92,5 @@ npm run test:swap
 
 ## References
 
-* **BIP110 Specification Gist**: [BIP110 Opcode Ban Spec](https://gist.github.com/a1denvalu3/7641b514bdb3b9de1b0f87a96c19cbf4)
+* **Formalized Scheme Specification Gist**: [Double-Sided Replay-Protected Atomic Swap Gist](https://gist.github.com/a1denvalu3/7641b514bdb3b9de1b0f87a96c19cbf4)
 * **Engines Used**: `bitcoinjs-lib` (v7), `tiny-secp256k1` (v2), and standard Bitcoin Regtest nodes.
