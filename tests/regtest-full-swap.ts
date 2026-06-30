@@ -128,7 +128,14 @@ async function runFullSwapTest() {
     console.log(`   - Block 101 Mined. Initiator Funded: ${initFundTxid}. Acceptor Funded: ${accFundTxid}`);
 
     // 6. Trigger Fork (Sever P2P connection)
-    console.log("\n5. Disconnecting nodes to trigger network fork split...");
+    console.log("\n5. Severing peer connections to simulate the BIP110 consensus hard fork...");
+    console.log("   - NOTE ON CONSENSUS VS STANDARDNESS:");
+    console.log("     In a production BIP110 deployment, the 'OP_IF' ban is a strict consensus rule.");
+    console.log("     A block containing an OP_IF transaction would be invalid on BIP110 nodes,");
+    console.log("     forcing automatic peer disconnection at the network layer.");
+    console.log("     Since standard Core & Knots nodes on regtest enforce this rule as a policy/standardness");
+    console.log("     rule rather than a consensus rule, we call 'disconnectnode' to correctly simulate");
+    console.log("     the post-fork separated state of both chains.");
     try {
         await mainRpc.call('disconnectnode', ['bitcoind-bip110:18444']);
         console.log("   - Nodes severed.");

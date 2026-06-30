@@ -110,8 +110,15 @@ async function runSplitPrimitiveTest() {
     console.log(`   - Block 101 Mined. Initiator Fund TxID: ${fundTxid}`);
     console.log(`   - Block 101 Mined. Acceptor Fund TxID : ${accFundTxid}`);
 
-    // 5. Trigger fork split by disconnecting nodes
-    console.log("\n5. Disconnecting nodes to trigger network split...");
+    // 5. Trigger Fork Split (Sever P2P Peer Connection)
+    console.log("\n5. Severing peer connections to simulate the BIP110 consensus hard fork...");
+    console.log("   - NOTE ON CONSENSUS VS STANDARDNESS:");
+    console.log("     In a production BIP110 deployment, the 'OP_IF' ban is a strict consensus rule.");
+    console.log("     A block containing an OP_IF transaction would be invalid on BIP110 nodes,");
+    console.log("     forcing automatic peer disconnection at the network layer.");
+    console.log("     Since standard Core & Knots nodes on regtest enforce this rule as a policy/standardness");
+    console.log("     rule rather than a consensus rule, we call 'disconnectnode' to correctly simulate");
+    console.log("     the post-fork separated state of both chains.");
     try {
         await mainRpc.call('disconnectnode', ['bitcoind-bip110:18444']);
         console.log("   - Nodes successfully severed.");
@@ -150,8 +157,9 @@ async function runSplitPrimitiveTest() {
         await bip110Rpc.call('sendrawtransaction', [rawMainHex]);
         console.error("❌ FAILURE: BIP110 Node accepted the Initiator's OP_IF spend!");
         process.exit(1);
-    } catch {
-        console.log("   - BIP110 Node successfully REJECTED Initiator's OP_IF transaction!");
+    } catch (err: any) {
+        console.log("   - BIP110 Node successfully REJECTED Initiator's OP_IF transaction! Error:");
+        console.log(`     "${err.message}"`);
     }
 
     // Attempt Acceptor replay
@@ -159,16 +167,22 @@ async function runSplitPrimitiveTest() {
         await bip110Rpc.call('sendrawtransaction', [rawAccMainHex]);
         console.error("❌ FAILURE: BIP110 Node accepted the Acceptor's OP_IF spend!");
         process.exit(1);
-    } catch {
-        console.log("   - BIP110 Node successfully REJECTED Acceptor's OP_IF transaction!");
+    } catch (err: any) {
+        console.log("   - BIP110 Node successfully REJECTED Acceptor's OP_IF transaction! Error:");
+        console.log(`     "${err.message}"`);
     }
     console.log("   - REPLAY PROTECTION VALIDATED FOR BOTH SIDES SUCCESSFULLY!");
 
     // 8. BIP110 Chain: Spend via Keypath using Tweaked Key (Schnorr)
     console.log("\n8. Executing Keypath spends on BIP110-Chain...");
 
-    // Initiator BIP110 Keypath spend
     const outputIndexBip110 = await findOutputIndex(bip110Rpc, fundTxid, Buffer.from(splitPayment.output!).toString('hex'));
+    console.log(`   - Output Index of fundTxid on BIP110-Chain: ${outputIndexBip110}`);
+
+    const txOutBip110 = await bip110Rpc.call('gettxout', [fundTxid, outputIndexBip110]);
+    console.log(`   - UTXO status of fundTxid on BIP110-Chain:`, txOutBip110);
+
+    // Initiator BIP110 Keypath spend
     const receiverAddrBip110 = await bip110Rpc.call('getnewaddress');
     const bip110SpendTx = PureBitcoinSwap.buildKeypathSplitTx(
         initiator, fundTxid, outputIndexBip110, 1000000000n, 999000000n, receiverAddrBip110, splitPayment, splitScript, bitcoin.networks.regtest
