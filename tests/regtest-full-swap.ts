@@ -109,12 +109,12 @@ async function runFullSwapTest() {
         await sleep(2000);
     } catch {}
 
-    // 3. Shared ancestry blocks 1-100
-    console.log("\n3. Mining 100 blocks of shared history...");
+    // 3. Shared ancestry blocks 1-110
+    console.log("\n3. Mining 110 blocks of shared history...");
     const sharedMinerAddr = await mainRpc.call('getnewaddress');
-    await mainRpc.call('generatetoaddress', [100, sharedMinerAddr]);
+    await mainRpc.call('generatetoaddress', [110, sharedMinerAddr]);
 
-    let heightMain = 100;
+    let heightMain = 110;
     let heightBip110 = 0;
     for (let i = 0; i < 10; i++) {
         heightMain = await mainRpc.call('getblockcount');

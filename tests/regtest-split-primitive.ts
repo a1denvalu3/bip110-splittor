@@ -21,6 +21,26 @@ function tapleafHash(script: any): Buffer {
     return Buffer.from(bitcoin.crypto.taggedHash('TapLeaf', prefix));
 }
 
+// Helper to mathematically calculate the Taproot Tweaked Keypair (including odd y-parity negation)
+function getTweakedKeyPair(keyPair: any, merkleRoot: Buffer): any {
+    const xOnlyKey = PureBitcoinSwap.getXOnlyPubKey(Buffer.from(keyPair.publicKey));
+    const tweak = Buffer.from(bitcoin.crypto.taggedHash('TapTweak', Buffer.concat([xOnlyKey, merkleRoot])));
+    
+    const isOdd = keyPair.publicKey[0] === 0x03;
+    let privKeyBuffer = Buffer.from(keyPair.privateKey);
+    if (isOdd) {
+        const curveOrder = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+        const privInt = BigInt('0x' + privKeyBuffer.toString('hex'));
+        const negatedInt = curveOrder - privInt;
+        let negatedHex = negatedInt.toString(16);
+        while (negatedHex.length < 64) negatedHex = '0' + negatedHex;
+        privKeyBuffer = Buffer.from(negatedHex, 'hex');
+    }
+    
+    const tweakedPrivateKeyBuffer = ecc.privateAdd(privKeyBuffer, tweak)!;
+    return ECPair.fromPrivateKey(Buffer.from(tweakedPrivateKeyBuffer), { network: bitcoin.networks.regtest });
+}
+
 class BitcoinRpc {
     private url: string;
     constructor(port: number) {
@@ -78,12 +98,12 @@ async function runSplitPrimitiveTest() {
         await sleep(2000);
     } catch {}
 
-    // 3. Shared ancestry blocks 1-100
-    console.log("\n3. Mining 100 blocks of shared history...");
+    // 3. Shared ancestry blocks 1-110
+    console.log("\n3. Mining 110 blocks of shared history...");
     const sharedMinerAddr = await mainRpc.call('getnewaddress');
-    await mainRpc.call('generatetoaddress', [100, sharedMinerAddr]);
+    await mainRpc.call('generatetoaddress', [110, sharedMinerAddr]);
 
-    let heightMain = 100;
+    let heightMain = 110;
     let heightBip110 = 0;
     for (let i = 0; i < 10; i++) {
         heightMain = await mainRpc.call('getblockcount');
@@ -193,11 +213,8 @@ async function runSplitPrimitiveTest() {
         bitcoin.Transaction.SIGHASH_DEFAULT
     );
 
-    // Calculate Tweak and tweaked private key mathematically
-    const xOnlyKey = PureBitcoinSwap.getXOnlyPubKey(Buffer.from(initiator.publicKey));
-    const tweak = Buffer.from(bitcoin.crypto.taggedHash('TapTweak', Buffer.concat([xOnlyKey, leafHash])));
-    const tweakedPrivateKeyBuffer = ecc.privateAdd(Buffer.from(initiator.privateKey!), tweak);
-    const tweakedKeyPair = ECPair.fromPrivateKey(Buffer.from(tweakedPrivateKeyBuffer!), { network: bitcoin.networks.regtest });
+    // Calculate mathematically perfect tweaked keypair (handling parity)
+    const tweakedKeyPair = getTweakedKeyPair(initiator, leafHash);
 
     // Sign using tweaked key
     const sigBip110 = Buffer.from(tweakedKeyPair.signSchnorr(sighashBip110));
