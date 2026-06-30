@@ -157,13 +157,26 @@ async function runRegtestSwap() {
     // Setup 6: Main Chain Spend (Blocks 102 - OP_IF Spend)
     // ----------------------------------------------------------------
     console.log("\n6. Spending Unsplit UTXO on Main-Chain via OP_IF script path...");
-    // Let's retrieve funding UTXO details
-    const fundTxOut = await mainRpc.call('gettxout', [fundTxid, 0]);
+    
+    // Dynamically find the correct output index of our funding transaction
+    const rawFundTx = await mainRpc.call('getrawtransaction', [fundTxid, true]);
+    let outputIndex = -1;
+    const targetScriptHex = Buffer.from(splitPayment.output!).toString('hex');
+    for (let i = 0; i < rawFundTx.vout.length; i++) {
+        if (rawFundTx.vout[i].scriptPubKey.hex === targetScriptHex) {
+            outputIndex = i;
+            break;
+        }
+    }
+    if (outputIndex === -1) throw new Error("Could not find funding output index.");
+    console.log(`   - Found funding output at index: ${outputIndex}`);
+
+    const fundTxOut = await mainRpc.call('gettxout', [fundTxid, outputIndex]);
     if (!fundTxOut) throw new Error("Could not find funding output on Main-Chain node.");
 
     const mainSpendTx = new bitcoin.Transaction();
     mainSpendTx.version = 2;
-    mainSpendTx.addInput(Buffer.from(fundTxid, 'hex').reverse(), 0);
+    mainSpendTx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
     
     // Send 9.99 BTC to a clean address
     const receiverAddrMain = await mainRpc.call('getnewaddress');
@@ -180,7 +193,7 @@ async function runRegtestSwap() {
         bitcoin.Transaction.SIGHASH_DEFAULT,
         leafHash
     );
-    const signature = initiator.sign(sighash);
+    const signature = Buffer.from(initiator.signSchnorr(sighash));
 
     // Witness Stack: [ signature, isBip110 = false, splitScript, controlBlock ]
     // Since isBip110 is false, we push empty buffer (represents OP_0 / false)
