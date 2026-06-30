@@ -1,45 +1,12 @@
 import { PureBitcoinSwap } from '../src/lib/PureBitcoinSwap';
 import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from 'tiny-secp256k1';
-import { ECPairFactory, ECPairAPI } from 'ecpair';
 import axios from 'axios';
 
 // Initialize ECPair API
 bitcoin.initEccLib(ecc);
-const ECPair: ECPairAPI = ECPairFactory(ecc);
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-// Helper to compute Taproot Tapleaf Hash
-function tapleafHash(script: any): Buffer {
-    const scriptBuffer = Buffer.from(script);
-    const prefix = Buffer.concat([
-        Buffer.from([0xc0]), // leafVersion
-        Buffer.from([scriptBuffer.length]), // compact size
-        scriptBuffer
-    ]);
-    return Buffer.from(bitcoin.crypto.taggedHash('TapLeaf', prefix));
-}
-
-// Helper to mathematically calculate the Taproot Tweaked Keypair (including odd y-parity negation)
-function getTweakedKeyPair(keyPair: any, merkleRoot: Buffer): any {
-    const xOnlyKey = PureBitcoinSwap.getXOnlyPubKey(Buffer.from(keyPair.publicKey));
-    const tweak = Buffer.from(bitcoin.crypto.taggedHash('TapTweak', Buffer.concat([xOnlyKey, merkleRoot])));
-    
-    const isOdd = keyPair.publicKey[0] === 0x03;
-    let privKeyBuffer = Buffer.from(keyPair.privateKey);
-    if (isOdd) {
-        const curveOrder = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
-        const privInt = BigInt('0x' + privKeyBuffer.toString('hex'));
-        const negatedInt = curveOrder - privInt;
-        let negatedHex = negatedInt.toString(16);
-        while (negatedHex.length < 64) negatedHex = '0' + negatedHex;
-        privKeyBuffer = Buffer.from(negatedHex, 'hex');
-    }
-    
-    const tweakedPrivateKeyBuffer = ecc.privateAdd(privKeyBuffer, tweak)!;
-    return ECPair.fromPrivateKey(Buffer.from(tweakedPrivateKeyBuffer), { network: bitcoin.networks.regtest });
-}
 
 class BitcoinRpc {
     private url: string;
@@ -83,6 +50,17 @@ async function setupWallet(rpc: BitcoinRpc) {
     }
 }
 
+// Find output index of a given target scriptPubKey hex
+async function findOutputIndex(rpc: BitcoinRpc, txid: string, targetScriptHex: string): Promise<number> {
+    const rawTx = await rpc.call('getrawtransaction', [txid, true]);
+    for (let i = 0; i < rawTx.vout.length; i++) {
+        if (rawTx.vout[i].scriptPubKey.hex === targetScriptHex) {
+            return i;
+        }
+    }
+    throw new Error(`Could not find output index for script: ${targetScriptHex}`);
+}
+
 async function runSplitPrimitiveTest() {
     console.log("🚀 Starting BIP110 Split Primitive Regtest Verification...");
 
@@ -116,32 +94,12 @@ async function runSplitPrimitiveTest() {
     // 4. Create and Fund Split Output (Block 101)
     console.log("\n4. Funding the Split outputs for Initiator and Acceptor with 10 BTC each...");
     const initiator = PureBitcoinSwap.generateKeyPair();
-    const splitScript = PureBitcoinSwap.createSplitScript(Buffer.from(initiator.publicKey));
-
-    const splitPayment = bitcoin.payments.p2tr({
-        internalPubkey: PureBitcoinSwap.getXOnlyPubKey(Buffer.from(initiator.publicKey)),
-        scriptTree: { output: splitScript },
-        redeem: {
-            output: splitScript,
-            redeemVersion: 0xc0
-        },
-        network: bitcoin.networks.regtest
-    });
+    const { payment: splitPayment, script: splitScript } = PureBitcoinSwap.createSplitPayment(Buffer.from(initiator.publicKey), bitcoin.networks.regtest);
     const splitAddress = splitPayment.address!;
     console.log(`   - Initiator Split Contract Address: ${splitAddress}`);
 
     const acceptor = PureBitcoinSwap.generateKeyPair();
-    const accSplitScript = PureBitcoinSwap.createSplitScript(Buffer.from(acceptor.publicKey));
-
-    const accSplitPayment = bitcoin.payments.p2tr({
-        internalPubkey: PureBitcoinSwap.getXOnlyPubKey(Buffer.from(acceptor.publicKey)),
-        scriptTree: { output: accSplitScript },
-        redeem: {
-            output: accSplitScript,
-            redeemVersion: 0xc0
-        },
-        network: bitcoin.networks.regtest
-    });
+    const { payment: accSplitPayment, script: accSplitScript } = PureBitcoinSwap.createSplitPayment(Buffer.from(acceptor.publicKey), bitcoin.networks.regtest);
     const accSplitAddress = accSplitPayment.address!;
     console.log(`   - Acceptor Split Contract Address : ${accSplitAddress}`);
 
@@ -163,83 +121,21 @@ async function runSplitPrimitiveTest() {
     console.log("\n6. Executing OP_IF Scriptpath spends on Main-Chain...");
     
     // Initiator Main Chain spend
-    const rawFundTx = await mainRpc.call('getrawtransaction', [fundTxid, true]);
-    let outputIndex = -1;
-    const targetScriptHex = Buffer.from(splitPayment.output!).toString('hex');
-    for (let i = 0; i < rawFundTx.vout.length; i++) {
-        if (rawFundTx.vout[i].scriptPubKey.hex === targetScriptHex) {
-            outputIndex = i;
-            break;
-        }
-    }
-    if (outputIndex === -1) throw new Error("Could not find Initiator funding output index.");
-
-    const mainSpendTx = new bitcoin.Transaction();
-    mainSpendTx.version = 2;
-    mainSpendTx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
-
+    const outputIndex = await findOutputIndex(mainRpc, fundTxid, Buffer.from(splitPayment.output!).toString('hex'));
     const receiverAddrMain = await mainRpc.call('getnewaddress');
-    mainSpendTx.addOutput(bitcoin.address.toOutputScript(receiverAddrMain, bitcoin.networks.regtest), 999000000n);
-
-    const leafHash = tapleafHash(splitScript);
-    const sighashMain = mainSpendTx.hashForWitnessV1(
-        0,
-        [splitPayment.output!],
-        [1000000000n],
-        bitcoin.Transaction.SIGHASH_DEFAULT,
-        leafHash
+    const mainSpendTx = PureBitcoinSwap.buildScriptpathSplitTx(
+        initiator, fundTxid, outputIndex, 1000000000n, 999000000n, receiverAddrMain, splitPayment, splitScript, bitcoin.networks.regtest
     );
-    const sigMain = Buffer.from(initiator.signSchnorr(sighashMain));
-    const controlBlock = splitPayment.witness![1];
-
-    mainSpendTx.setWitness(0, [
-        sigMain,
-        Buffer.alloc(0), // isBip110 = false
-        splitScript,
-        controlBlock
-    ]);
-
     const rawMainHex = mainSpendTx.toHex();
     const splitTxidMain = await mainRpc.call('sendrawtransaction', [rawMainHex]);
     console.log(`   - Initiator split accepted on Main-Chain! TxID: ${splitTxidMain}`);
 
     // Acceptor Main Chain spend
-    const rawAccFundTx = await mainRpc.call('getrawtransaction', [accFundTxid, true]);
-    let accOutputIndex = -1;
-    const accTargetScriptHex = Buffer.from(accSplitPayment.output!).toString('hex');
-    for (let i = 0; i < rawAccFundTx.vout.length; i++) {
-        if (rawAccFundTx.vout[i].scriptPubKey.hex === accTargetScriptHex) {
-            accOutputIndex = i;
-            break;
-        }
-    }
-    if (accOutputIndex === -1) throw new Error("Could not find Acceptor funding output index.");
-
-    const accMainSpendTx = new bitcoin.Transaction();
-    accMainSpendTx.version = 2;
-    accMainSpendTx.addInput(Buffer.from(accFundTxid, 'hex').reverse(), accOutputIndex);
-
+    const accOutputIndex = await findOutputIndex(mainRpc, accFundTxid, Buffer.from(accSplitPayment.output!).toString('hex'));
     const accReceiverAddrMain = await mainRpc.call('getnewaddress');
-    accMainSpendTx.addOutput(bitcoin.address.toOutputScript(accReceiverAddrMain, bitcoin.networks.regtest), 999000000n);
-
-    const accLeafHash = tapleafHash(accSplitScript);
-    const accSighashMain = accMainSpendTx.hashForWitnessV1(
-        0,
-        [accSplitPayment.output!],
-        [1000000000n],
-        bitcoin.Transaction.SIGHASH_DEFAULT,
-        accLeafHash
+    const accMainSpendTx = PureBitcoinSwap.buildScriptpathSplitTx(
+        acceptor, accFundTxid, accOutputIndex, 1000000000n, 999000000n, accReceiverAddrMain, accSplitPayment, accSplitScript, bitcoin.networks.regtest
     );
-    const accSigMain = Buffer.from(acceptor.signSchnorr(accSighashMain));
-    const accControlBlock = accSplitPayment.witness![1];
-
-    accMainSpendTx.setWitness(0, [
-        accSigMain,
-        Buffer.alloc(0), // isBip110 = false
-        accSplitScript,
-        accControlBlock
-    ]);
-
     const rawAccMainHex = accMainSpendTx.toHex();
     const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [rawAccMainHex]);
     console.log(`   - Acceptor split accepted on Main-Chain! TxID: ${accSplitTxidMain}`);
@@ -272,59 +168,20 @@ async function runSplitPrimitiveTest() {
     console.log("\n8. Executing Keypath spends on BIP110-Chain...");
 
     // Initiator BIP110 Keypath spend
-    const bip110SpendTx = new bitcoin.Transaction();
-    bip110SpendTx.version = 2;
-    bip110SpendTx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
-
+    const outputIndexBip110 = await findOutputIndex(bip110Rpc, fundTxid, Buffer.from(splitPayment.output!).toString('hex'));
     const receiverAddrBip110 = await bip110Rpc.call('getnewaddress');
-    bip110SpendTx.addOutput(bitcoin.address.toOutputScript(receiverAddrBip110, bitcoin.networks.regtest), 999000000n);
-
-    // Calculate Taproot Keypath sighash
-    const sighashBip110 = bip110SpendTx.hashForWitnessV1(
-        0,
-        [splitPayment.output!],
-        [1000000000n],
-        bitcoin.Transaction.SIGHASH_DEFAULT
+    const bip110SpendTx = PureBitcoinSwap.buildKeypathSplitTx(
+        initiator, fundTxid, outputIndexBip110, 1000000000n, 999000000n, receiverAddrBip110, splitPayment, splitScript, bitcoin.networks.regtest
     );
-
-    // Calculate mathematically perfect tweaked keypair (handling parity)
-    const tweakedKeyPair = getTweakedKeyPair(initiator, leafHash);
-
-    // Sign using tweaked key
-    const sigBip110 = Buffer.from(tweakedKeyPair.signSchnorr(sighashBip110));
-
-    // Witness Stack for Keypath spend contains ONLY the signature!
-    bip110SpendTx.setWitness(0, [sigBip110]);
-
     const splitTxidBip110 = await bip110Rpc.call('sendrawtransaction', [bip110SpendTx.toHex()]);
     console.log(`   - Initiator keypath split accepted on BIP110-Chain! TxID: ${splitTxidBip110}`);
 
-
     // Acceptor BIP110 Keypath spend
-    const accBip110SpendTx = new bitcoin.Transaction();
-    accBip110SpendTx.version = 2;
-    accBip110SpendTx.addInput(Buffer.from(accFundTxid, 'hex').reverse(), accOutputIndex);
-
+    const accOutputIndexBip110 = await findOutputIndex(bip110Rpc, accFundTxid, Buffer.from(accSplitPayment.output!).toString('hex'));
     const accReceiverAddrBip110 = await bip110Rpc.call('getnewaddress');
-    accBip110SpendTx.addOutput(bitcoin.address.toOutputScript(accReceiverAddrBip110, bitcoin.networks.regtest), 999000000n);
-
-    // Calculate Taproot Keypath sighash
-    const accSighashBip110 = accBip110SpendTx.hashForWitnessV1(
-        0,
-        [accSplitPayment.output!],
-        [1000000000n],
-        bitcoin.Transaction.SIGHASH_DEFAULT
+    const accBip110SpendTx = PureBitcoinSwap.buildKeypathSplitTx(
+        acceptor, accFundTxid, accOutputIndexBip110, 1000000000n, 999000000n, accReceiverAddrBip110, accSplitPayment, accSplitScript, bitcoin.networks.regtest
     );
-
-    // Calculate mathematically perfect tweaked keypair (handling parity)
-    const accTweakedKeyPair = getTweakedKeyPair(acceptor, accLeafHash);
-
-    // Sign using tweaked key
-    const accSigBip110 = Buffer.from(accTweakedKeyPair.signSchnorr(accSighashBip110));
-
-    // Witness Stack for Keypath spend contains ONLY the signature!
-    accBip110SpendTx.setWitness(0, [accSigBip110]);
-
     const accSplitTxidBip110 = await bip110Rpc.call('sendrawtransaction', [accBip110SpendTx.toHex()]);
     console.log(`   - Acceptor keypath split accepted on BIP110-Chain! TxID: ${accSplitTxidBip110}`);
 

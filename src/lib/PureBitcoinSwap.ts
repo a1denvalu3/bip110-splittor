@@ -77,6 +77,9 @@ export class PureBitcoinSwap {
     /**
      * 4. Build a Taproot Output committing to both MAST leaves.
      */
+    /**
+     * 4. Build a Taproot Output committing to both MAST leaves.
+     */
     static createTaprootHtlc(
         internalPubKey: Buffer, // Aggregated MuSig2 key
         hashLock: Buffer,
@@ -96,5 +99,205 @@ export class PureBitcoinSwap {
             scriptTree: [claimLeaf, refundLeaf],
             network
         });
+    }
+
+    // Helper to compute Taproot Tapleaf Hash
+    static tapleafHash(script: Buffer): Buffer {
+        const prefix = Buffer.concat([
+            Buffer.from([0xc0]), // leafVersion
+            Buffer.from([script.length]), // compact size
+            script
+        ]);
+        return Buffer.from(bitcoin.crypto.taggedHash('TapLeaf', prefix));
+    }
+
+    // Helper to mathematically calculate the Taproot Tweaked Keypair (including odd y-parity negation)
+    static getTweakedKeyPair(keyPair: ECPairInterface, merkleRoot: Buffer, network: bitcoin.Network = bitcoin.networks.regtest): ECPairInterface {
+        const xOnlyKey = this.getXOnlyPubKey(Buffer.from(keyPair.publicKey));
+        const tweak = Buffer.from(bitcoin.crypto.taggedHash('TapTweak', Buffer.concat([xOnlyKey, merkleRoot])));
+        
+        const isOdd = keyPair.publicKey[0] === 0x03;
+        let privKeyBuffer = Buffer.from(keyPair.privateKey!);
+        if (isOdd) {
+            const curveOrder = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+            const privInt = BigInt('0x' + privKeyBuffer.toString('hex'));
+            const negatedInt = curveOrder - privInt;
+            let negatedHex = negatedInt.toString(16);
+            while (negatedHex.length < 64) negatedHex = '0' + negatedHex;
+            privKeyBuffer = Buffer.from(negatedHex, 'hex');
+        }
+        
+        const tweakedPrivateKeyBuffer = ecc.privateAdd(privKeyBuffer, tweak)!;
+        return ECPair.fromPrivateKey(Buffer.from(tweakedPrivateKeyBuffer), { network });
+    }
+
+    // Helper to build Split Payment setup
+    static createSplitPayment(ownerPubKey: Buffer, network: bitcoin.Network = bitcoin.networks.regtest) {
+        const script = this.createSplitScript(ownerPubKey);
+        const payment = bitcoin.payments.p2tr({
+            internalPubkey: this.getXOnlyPubKey(ownerPubKey),
+            scriptTree: { output: script },
+            redeem: { output: script, redeemVersion: 0xc0 },
+            network
+        });
+        const leafHash = this.tapleafHash(script);
+        return { payment, script, leafHash };
+    }
+
+    /**
+     * Builds and signs a Main-Chain Split Spend (Scriptpath spend using OP_IF)
+     */
+    static buildScriptpathSplitTx(
+        ownerKeyPair: ECPairInterface,
+        fundTxid: string,
+        outputIndex: number,
+        inputSats: bigint,
+        outputSats: bigint,
+        destAddr: string,
+        splitPayment: bitcoin.payments.Payment,
+        splitScript: Buffer,
+        network: bitcoin.Network = bitcoin.networks.regtest
+    ): bitcoin.Transaction {
+        const tx = new bitcoin.Transaction();
+        tx.version = 2;
+        tx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
+        tx.addOutput(bitcoin.address.toOutputScript(destAddr, network), outputSats);
+
+        const leafHash = this.tapleafHash(splitScript);
+        const sighash = tx.hashForWitnessV1(
+            0, [splitPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
+        );
+        const sig = Buffer.from(ownerKeyPair.signSchnorr(sighash));
+        const controlBlock = splitPayment.witness![1];
+
+        tx.setWitness(0, [
+            sig,
+            Buffer.alloc(0), // isBip110 = false (takes the OP_ELSE branch)
+            splitScript,
+            controlBlock
+        ]);
+
+        return tx;
+    }
+
+    /**
+     * Builds and signs a BIP110-Chain Split Spend (Keypath spend via Tweaked Key)
+     */
+    static buildKeypathSplitTx(
+        ownerKeyPair: ECPairInterface,
+        fundTxid: string,
+        outputIndex: number,
+        inputSats: bigint,
+        outputSats: bigint,
+        destAddr: string,
+        splitPayment: bitcoin.payments.Payment,
+        splitScript: Buffer,
+        network: bitcoin.Network = bitcoin.networks.regtest
+    ): bitcoin.Transaction {
+        const tx = new bitcoin.Transaction();
+        tx.version = 2;
+        tx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
+        tx.addOutput(bitcoin.address.toOutputScript(destAddr, network), outputSats);
+
+        const leafHash = this.tapleafHash(splitScript);
+        const sighash = tx.hashForWitnessV1(
+            0, [splitPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
+        );
+
+        const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, leafHash, network);
+        const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
+
+        tx.setWitness(0, [sig]);
+
+        return tx;
+    }
+
+    /**
+     * Builds and signs an HTLC funding transaction spending from a split destination P2TR keypath UTXO.
+     */
+    static buildHtlcFundingTx(
+        ownerKeyPair: ECPairInterface,
+        splitTxid: string,
+        outputIndex: number,
+        inputSats: bigint,
+        outputSats: bigint,
+        htlcAddr: string,
+        splitDestPayment: bitcoin.payments.Payment,
+        network: bitcoin.Network = bitcoin.networks.regtest
+    ): bitcoin.Transaction {
+        const tx = new bitcoin.Transaction();
+        tx.version = 2;
+        tx.addInput(Buffer.from(splitTxid, 'hex').reverse(), outputIndex);
+        tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), outputSats);
+
+        const sighash = tx.hashForWitnessV1(
+            0, [splitDestPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
+        );
+
+        // Sign the funding spend (P2TR Keypath spend with empty tweak for pure Keypath output)
+        const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, Buffer.alloc(0), network);
+        const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
+
+        tx.setWitness(0, [sig]);
+
+        return tx;
+    }
+
+    /**
+     * Builds and signs an HTLC claim transaction spending via the ClaimLeaf scriptpath.
+     */
+    static buildHtlcClaimTx(
+        recipientKeyPair: ECPairInterface,
+        htlcFundTxid: string,
+        outputIndex: number,
+        inputSats: bigint,
+        outputSats: bigint,
+        claimDestAddr: string,
+        hashLock: Buffer,
+        preimage: Buffer,
+        htlcPayment: bitcoin.payments.Payment,
+        internalPubKey: Buffer,
+        refundPubKey: Buffer,
+        lockTime: number,
+        network: bitcoin.Network = bitcoin.networks.regtest
+    ): bitcoin.Transaction {
+        const tx = new bitcoin.Transaction();
+        tx.version = 2;
+        tx.addInput(Buffer.from(htlcFundTxid, 'hex').reverse(), outputIndex);
+        tx.addOutput(bitcoin.address.toOutputScript(claimDestAddr, network), outputSats);
+
+        const claimScript = this.createHtlcClaimScript(hashLock, Buffer.from(recipientKeyPair.publicKey));
+        const leafHash = this.tapleafHash(claimScript);
+
+        const sighash = tx.hashForWitnessV1(
+            0, [htlcPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
+        );
+        const sig = Buffer.from(recipientKeyPair.signSchnorr(sighash));
+
+        // Reconstruct the scriptTree to get the correct control block
+        const claimLeafInfo = { output: claimScript };
+        const refundScript = this.createHtlcRefundScript(refundPubKey, lockTime);
+        const refundLeafInfo = { output: refundScript };
+
+        const claimPayment = bitcoin.payments.p2tr({
+            internalPubkey: this.getXOnlyPubKey(internalPubKey),
+            scriptTree: [claimLeafInfo, refundLeafInfo] as any,
+            redeem: {
+                output: claimScript,
+                redeemVersion: 0xc0
+            },
+            network
+        });
+
+        const controlBlock = claimPayment.witness![1];
+
+        tx.setWitness(0, [
+            sig,
+            preimage,
+            claimScript,
+            controlBlock
+        ]);
+
+        return tx;
     }
 }
