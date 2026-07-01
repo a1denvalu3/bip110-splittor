@@ -113,7 +113,6 @@ async function runSplitPrimitiveTest() {
     // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
     console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
     console.log("   - We are running the Knots node with consensusrules=rdts active.");
-    console.log("   - We do NOT call 'disconnectnode'. Peer connections remain completely open!");
     const initialPeers = await mainRpc.call('getpeerinfo');
     console.log(`   - Initial Peer Count: ${initialPeers.length} (Nodes are connected)`);
 
