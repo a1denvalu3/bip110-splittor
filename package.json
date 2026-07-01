@@ -7,25 +7,33 @@
     "test": "mocha -r ts-node/register tests/**/*.test.ts",
     "test:split": "npx ts-node tests/regtest-split-primitive.ts",
     "test:swap": "npx ts-node tests/regtest-full-swap.ts",
-    "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts"
+    "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts",
+    "server": "npx ts-node webapp/backend/server.ts",
+    "frontend": "npm run dev --prefix webapp/frontend"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@bitcoinerlab/secp256k1": "^1.2.0",
     "axios": "^1.18.1",
     "bitcoinjs-lib": "^7.0.1",
+    "cors": "^2.8.6",
     "ecpair": "^3.0.1",
+    "express": "^5.2.1",
     "tiny-secp256k1": "^2.2.4"
   },
   "devDependencies": {
     "@types/chai": "^5.2.3",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/mocha": "^10.0.10",
     "@types/node": "^26.0.1",
     "chai": "^6.2.2",
     "mocha": "^11.7.6",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vite-plugin-node-polyfills": "^0.28.0"
   }
 }
