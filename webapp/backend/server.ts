@@ -28,33 +28,80 @@ interface Offer {
 }
 
 const offers: Record<string, Offer> = {};
+const splitTxids = new Set<string>(); // Tracks registered scriptpath split transaction IDs
 
-// Bitcoin RPC helper for Regtest
+// Bitcoin RPC helper for Regtest with Auto-Healing Wallet Loader
 class BitcoinRpc {
-    private url: string;
+    private port: number;
+    private walletName?: string;
+    
     constructor(port: number, walletName?: string) {
-        if (walletName) {
-            this.url = `http://user:password@127.0.0.1:${port}/wallet/${walletName}`;
-        } else {
-            this.url = `http://user:password@127.0.0.1:${port}/`;
+        this.port = port;
+        this.walletName = walletName;
+    }
+
+    private getUrl(withWallet: boolean = true): string {
+        if (withWallet && this.walletName) {
+            return `http://user:password@127.0.0.1:${this.port}/wallet/${this.walletName}`;
         }
+        return `http://user:password@127.0.0.1:${this.port}/`;
     }
 
     async call(method: string, params: any[] = []): Promise<any> {
         try {
-            const response = await axios.post(this.url, {
+            const response = await axios.post(this.getUrl(true), {
                 jsonrpc: '1.0',
                 id: 'regtest-web',
                 method,
                 params
             }, {
                 headers: { 'Content-Type': 'application/json' },
-                timeout: 5000
+                timeout: 30000 // Increased timeout to 30 seconds for heavy regtest operations
             });
             return response.data.result;
         } catch (err: any) {
             if (err.response && err.response.data && err.response.data.error) {
-                throw new Error(`[RPC ${method}] ${err.response.data.error.message}`);
+                const errMsg = err.response.data.error.message;
+                if (this.walletName && (errMsg.includes('not loaded') || errMsg.includes('does not exist') || errMsg.includes('not found'))) {
+                    console.log(`Auto-healing: Wallet '${this.walletName}' on port ${this.port} is not loaded. Attempting auto-load/create...`);
+                    try {
+                        await axios.post(this.getUrl(false), {
+                            jsonrpc: '1.0',
+                            id: 'regtest-web',
+                            method: 'loadwallet',
+                            params: [this.walletName]
+                        }, { headers: { 'Content-Type': 'application/json' } });
+                    } catch (loadErr: any) {
+                        try {
+                            const disableKeys = this.walletName === 'watchonly';
+                            await axios.post(this.getUrl(false), {
+                                jsonrpc: '1.0',
+                                id: 'regtest-web',
+                                method: 'createwallet',
+                                params: [this.walletName, disableKeys]
+                            }, { headers: { 'Content-Type': 'application/json' } });
+                        } catch (createErr) {}
+                    }
+                    
+                    try {
+                        const response = await axios.post(this.getUrl(true), {
+                            jsonrpc: '1.0',
+                            id: 'regtest-web',
+                            method,
+                            params
+                        }, {
+                            headers: { 'Content-Type': 'application/json' },
+                            timeout: 5000
+                        });
+                        return response.data.result;
+                    } catch (retryErr: any) {
+                        if (retryErr.response && retryErr.response.data && retryErr.response.data.error) {
+                            throw new Error(`[RPC ${method}] ${retryErr.response.data.error.message}`);
+                        }
+                        throw new Error(`[RPC ${method}] ${retryErr.message}`);
+                    }
+                }
+                throw new Error(`[RPC ${method}] ${errMsg}`);
             }
             throw new Error(`[RPC ${method}] ${err.message}`);
         }
@@ -74,8 +121,29 @@ const bip110WatchRpc = new BitcoinRpc(18444, 'watchonly');
 const mainRootRpc = new BitcoinRpc(18443);
 const bip110RootRpc = new BitcoinRpc(18444);
 
-// Initialize dual wallets on startup
+// Initialize dual wallets and P2P connection on startup
 async function initNodeWallets() {
+    console.log("Connecting to Bitcoin nodes...");
+    
+    // Wait for RPC ports to become available (polling up to 15 times with 2s delay)
+    let retries = 15;
+    while (retries > 0) {
+        try {
+            await mainRootRpc.call('getblockcount');
+            await bip110RootRpc.call('getblockcount');
+            break; // Both responded successfully!
+        } catch (err) {
+            console.log(`Waiting for Bitcoin nodes to fully start up... (${retries} retries left)`);
+            retries--;
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    }
+
+    if (retries === 0) {
+        console.error("Fatal Error: Could not connect to Bitcoin nodes after 15 retries.");
+        process.exit(1);
+    }
+
     // 1. Setup 'miner' wallet (has private keys enabled)
     for (const rpc of [mainRootRpc, bip110RootRpc]) {
         try {
@@ -93,7 +161,6 @@ async function initNodeWallets() {
     // 2. Setup 'watchonly' wallet (has private keys disabled, required for watch-only taproot imports)
     for (const rpc of [mainRootRpc, bip110RootRpc]) {
         try {
-            // Second param is disable_private_keys = true
             await rpc.call('createwallet', ['watchonly', true]);
             console.log("Created watch-only wallet 'watchonly'");
         } catch (err: any) {
@@ -103,6 +170,14 @@ async function initNodeWallets() {
                 } catch {}
             }
         }
+    }
+
+    // 3. Connect Main-Chain node to BIP110 Knots node over P2P natively
+    try {
+        await mainRootRpc.call('addnode', ['bitcoind-bip110:18444', 'add']);
+        console.log("Connected Main-Chain node to BIP110 Knots node over P2P.");
+    } catch (err: any) {
+        console.warn("Failed to connect P2P nodes:", err.message);
     }
 }
 
@@ -277,15 +352,37 @@ app.post('/api/regtest/mine', async (req: Request, res: Response) => {
     try {
         const minerAddress = await minerRpc.call('getnewaddress');
         const hashes = await minerRpc.call('generatetoaddress', [numBlocks, minerAddress]);
+
+        // If we mined blocks on the Main-chain, check if any block contains our split transaction!
+        if (chain === 'main') {
+            for (const hash of hashes) {
+                const blockInfo = await mainRootRpc.call('getblock', [hash, 1]);
+                const blockTxids = blockInfo.tx || [];
+                
+                // If any transaction in this block is a registered split transaction,
+                // we invalidate this block on Knots to simulate the consensus-level BIP110 block rejection!
+                const containsSplit = blockTxids.some((txid: string) => splitTxids.has(txid));
+                if (containsSplit) {
+                    try {
+                        await bip110MinerRpc.call('invalidateblock', [hash]);
+                        console.log(`BIP110 CONSENSUS ENFORCED: Invalidated Core block ${hash} on Knots containing OP_IF split spend.`);
+                    } catch (err: any) {
+                        console.warn("Invalidateblock warning:", err.message);
+                    }
+                }
+            }
+        }
+
         res.json({ success: true, hashes });
     } catch (err: any) {
+        console.error("Mining endpoint error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
 // 8. Broadcast Signed Raw Transaction (supports Mempool.space in Production)
 app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
-    const { hex, chain, networkMode } = req.body;
+    const { hex, chain, networkMode, isSplit } = req.body;
     if (!hex || !chain) {
         return res.status(400).json({ error: "Missing raw transaction hex or chain parameter" });
     }
@@ -308,6 +405,13 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 
     try {
         const txid = await minerRpc.call('sendrawtransaction', [hex]);
+        
+        // Register split transactions so we can invalidate their mined block hash on Knots
+        if (isSplit && chain === 'main') {
+            splitTxids.add(txid);
+            console.log(`Registered scriptpath split transaction: ${txid}`);
+        }
+
         res.json({ success: true, txid });
     } catch (err: any) {
         res.status(400).json({ error: err.message });

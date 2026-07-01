@@ -8,8 +8,9 @@
     "test:split": "npx ts-node tests/regtest-split-primitive.ts",
     "test:swap": "npx ts-node tests/regtest-full-swap.ts",
     "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts",
-    "server": "npx ts-node webapp/backend/server.ts",
-    "frontend": "npm run dev --prefix webapp/frontend"
+    "server": "docker compose up -d && npx ts-node webapp/backend/server.ts",
+    "frontend": "npm run dev --prefix webapp/frontend",
+    "stop": "docker compose down -v && pkill -f ts-node || true"
   },
   "keywords": [],
   "author": "",

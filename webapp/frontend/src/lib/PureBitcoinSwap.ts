@@ -111,6 +111,22 @@ export class PureBitcoinSwap {
     }
 
     // Helper to mathematically calculate the Taproot Tweaked Keypair (including odd y-parity negation)
+    // Helper to negate the private key for Schnorr signing if the public key has odd y-parity
+    static getSchnorrKeyPair(keyPair: ECPairInterface, network: bitcoin.Network = bitcoin.networks.regtest): ECPairInterface {
+        const isOdd = keyPair.publicKey[0] === 0x03;
+        if (!isOdd) return keyPair;
+        
+        const curveOrder = BigInt('0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141');
+        let privKeyBuffer = Buffer.from(keyPair.privateKey!);
+        const privInt = BigInt('0x' + privKeyBuffer.toString('hex'));
+        const negatedInt = curveOrder - privInt;
+        let negatedHex = negatedInt.toString(16);
+        while (negatedHex.length < 64) negatedHex = '0' + negatedHex;
+        privKeyBuffer = Buffer.from(negatedHex, 'hex');
+        
+        return ECPair.fromPrivateKey(privKeyBuffer, { network });
+    }
+
     static getTweakedKeyPair(keyPair: ECPairInterface, merkleRoot: Buffer, network: bitcoin.Network = bitcoin.networks.regtest): ECPairInterface {
         const xOnlyKey = this.getXOnlyPubKey(Buffer.from(keyPair.publicKey));
         const tweak = Buffer.from(bitcoin.crypto.taggedHash('TapTweak', Buffer.concat([xOnlyKey, merkleRoot])));
@@ -166,7 +182,8 @@ export class PureBitcoinSwap {
         const sighash = tx.hashForWitnessV1(
             0, [splitPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
         );
-        const sig = Buffer.from(ownerKeyPair.signSchnorr(sighash));
+        const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
+        const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
         const controlBlock = splitPayment.witness![1];
 
         tx.setWitness(0, [
@@ -271,7 +288,8 @@ export class PureBitcoinSwap {
         const sighash = tx.hashForWitnessV1(
             0, [htlcPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
         );
-        const sig = Buffer.from(recipientKeyPair.signSchnorr(sighash));
+        const schnorrKey = this.getSchnorrKeyPair(recipientKeyPair, network);
+        const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
 
         // Reconstruct the scriptTree to get the correct control block
         const claimLeafInfo = { output: claimScript };
@@ -335,7 +353,8 @@ export class PureBitcoinSwap {
         const sighash = tx.hashForWitnessV1(
             0, [htlcPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
         );
-        const sig = Buffer.from(refundKeyPair.signSchnorr(sighash));
+        const schnorrKey = this.getSchnorrKeyPair(refundKeyPair, network);
+        const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
 
         // Reconstruct scriptTree to get correct control block
         const claimScript = this.createHtlcClaimScript(hashLock, recipientPubKey);

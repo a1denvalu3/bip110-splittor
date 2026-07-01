@@ -24,7 +24,9 @@ import {
   ExternalLink,
   Lock,
   Globe,
-  Flame
+  Flame,
+  UserCheck,
+  Check
 } from 'lucide-react';
 
 // Initialize Elliptic Curve library in the browser
@@ -67,24 +69,35 @@ export default function App() {
   const [privateKey, setPrivateKey] = useState<string>('');
   const [publicKey, setPublicKey] = useState<string>('');
   const [splitAddress, setSplitAddress] = useState<string>('');
+  const [ownAddress, setOwnAddress] = useState<string>('');
   const [revealPrivKey, setRevealPrivKey] = useState<boolean>(false);
   const [loadingKeys, setLoadingKeys] = useState<boolean>(false);
 
-  // Balances
+  // Balances of split contract address
   const [mainBalance, setMainBalance] = useState<number>(0);
   const [bip110Balance, setBip110Balance] = useState<number>(0);
   const [mainUtxos, setMainUtxos] = useState<UTXO[]>([]);
   const [bip110Utxos, setBip110Utxos] = useState<UTXO[]>([]);
+
+  // Balances of own split destination address (already split)
+  const [ownMainBalance, setOwnMainBalance] = useState<number>(0);
+  const [ownBip110Balance, setOwnBip110Balance] = useState<number>(0);
+  const [ownMainUtxos, setOwnMainUtxos] = useState<UTXO[]>([]);
+  const [ownBip110Utxos, setOwnBip110Utxos] = useState<UTXO[]>([]);
+
+  // Selected UTXO to split
   const [nodeInfo, setNodeInfo] = useState<{ mainHeight: number; bip110Height: number }>({ mainHeight: 0, bip110Height: 0 });
+  const [selectedUtxoToSplit, setSelectedUtxoToSplit] = useState<UTXO | null>(null);
+  const [splittingBilateral, setSplittingBilateral] = useState<boolean>(false);
+  const [bilateralSplitResult, setBilateralSplitResult] = useState<{
+    mainSuccess?: boolean;
+    mainTxid?: string;
+    mainError?: string;
+  } | null>(null);
 
   // Faucet & Block Mining (Regtest only)
   const [faucetAmount, setFaucetAmount] = useState<string>('100000000'); // 1 BTC/B110 in sats
   const [faucetLoading, setFaucetLoading] = useState<Record<string, boolean>>({});
-
-  // Splitter Action State
-  const [splitDestAddr, setSplitDestAddr] = useState<string>('');
-  const [splitting, setSplitting] = useState<Record<string, boolean>>({});
-  const [splitResults, setSplitResults] = useState<Record<string, { success: boolean; txid?: string; error?: string }>>({});
 
   // Marketplace State
   const [offersList, setOffersList] = useState<Offer[]>([]);
@@ -105,6 +118,26 @@ export default function App() {
     return networkMode === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
   };
 
+  // Helper to determine if a BIP110-Chain contract UTXO is split
+  // It is split if it exists on BIP110 but does NOT exist on the Main-Chain (meaning the Main-Chain has successfully spent it!)
+  const isBip110UtxoSplit = (u: UTXO): boolean => {
+    return !mainUtxos.some(mainU => mainU.txid === u.txid && mainU.vout === u.vout);
+  };
+
+  // Helper to get total BIP110 split balance
+  const getBip110SplitBalance = (): number => {
+    return bip110Utxos
+      .filter(u => isBip110UtxoSplit(u))
+      .reduce((sum, u) => sum + u.amount, 0);
+  };
+
+  // Helper to get total BIP110 unsplit balance
+  const getBip110UnsplitBalance = (): number => {
+    return bip110Utxos
+      .filter(u => !isBip110UtxoSplit(u))
+      .reduce((sum, u) => sum + u.amount, 0);
+  };
+
   // Load saved keys from LocalStorage on mount or networkMode change
   useEffect(() => {
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
@@ -116,6 +149,14 @@ export default function App() {
       setPrivateKey(savedPriv);
       setPublicKey(savedPub);
       setSplitAddress(savedAddress);
+
+      // Compute ownAddress
+      const net = getNetwork();
+      const ownPayment = bitcoin.payments.p2tr({
+        internalPubkey: PureBitcoinSwap.getXOnlyPubKey(Buffer.from(savedPub, 'hex')),
+        network: net
+      });
+      setOwnAddress(ownPayment.address!);
     } else {
       generateNewWallet();
     }
@@ -123,12 +164,12 @@ export default function App() {
     fetchOffers();
   }, [networkMode]);
 
-  // Sync balances and UTXOs when splitAddress or activeTab/networkMode changes
+  // Sync balances and UTXOs when splitAddress, ownAddress or activeTab/networkMode changes
   useEffect(() => {
-    if (splitAddress) {
+    if (splitAddress && ownAddress) {
       fetchBalances();
     }
-  }, [splitAddress, activeTab, networkMode]);
+  }, [splitAddress, ownAddress, activeTab, networkMode]);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
@@ -142,14 +183,20 @@ export default function App() {
       const pair = PureBitcoinSwap.generateKeyPair();
       const pubKeyBuffer = Buffer.from(pair.publicKey);
       const splitPayment = PureBitcoinSwap.createSplitPayment(pubKeyBuffer, net);
+      const ownPayment = bitcoin.payments.p2tr({
+        internalPubkey: PureBitcoinSwap.getXOnlyPubKey(pubKeyBuffer),
+        network: net
+      });
 
       const privHex = Buffer.from(pair.privateKey!).toString('hex');
       const pubHex = pubKeyBuffer.toString('hex');
       const addrStr = splitPayment.payment.address!;
+      const ownAddrStr = ownPayment.address!;
 
       setPrivateKey(privHex);
       setPublicKey(pubHex);
       setSplitAddress(addrStr);
+      setOwnAddress(ownAddrStr);
 
       const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
       localStorage.setItem(`${keyPrefix}_bip110_privkey`, privHex);
@@ -184,8 +231,9 @@ export default function App() {
   };
 
   const fetchBalances = async () => {
-    if (!splitAddress) return;
+    if (!splitAddress || !ownAddress) return;
     try {
+      // 1. Fetch Contract UTXOs (Unsplit)
       const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: splitAddress, chain: 'main', networkMode });
       setMainUtxos(resMain.data.utxos);
       const totalMain = resMain.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
@@ -195,6 +243,17 @@ export default function App() {
       setBip110Utxos(resBip110.data.utxos);
       const totalBip110 = resBip110.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
       setBip110Balance(totalBip110);
+
+      // 2. Fetch Own Keypath Address UTXOs (Already split)
+      const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: ownAddress, chain: 'main', networkMode });
+      setOwnMainUtxos(resOwnMain.data.utxos);
+      const totalOwnMain = resOwnMain.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
+      setOwnMainBalance(totalOwnMain);
+
+      const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: ownAddress, chain: 'bip110', networkMode });
+      setOwnBip110Utxos(resOwnBip110.data.utxos);
+      const totalOwnBip110 = resOwnBip110.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
+      setOwnBip110Balance(totalOwnBip110);
 
       if (networkMode === 'regtest') {
         fetchNodeInfo();
@@ -233,84 +292,75 @@ export default function App() {
     }
   };
 
-  const executeSplit = async (chain: 'main' | 'bip110') => {
-    const utxos = chain === 'main' ? mainUtxos : bip110Utxos;
-    if (utxos.length === 0) {
-      showToast(`No confirmed UTXOs on ${chain === 'main' ? 'Bitcoin' : 'BIP110'} to split!`, 'error');
+  const executeBilateralSplit = async () => {
+    if (!selectedUtxoToSplit) {
+      showToast('Please select an unsplit UTXO to split!', 'error');
       return;
     }
-    if (!splitDestAddr) {
-      showToast('Please provide a destination split address to receive split coins.', 'error');
+    if (!ownAddress) {
+      showToast('No split destination address computed.', 'error');
       return;
     }
 
-    setSplitting(prev => ({ ...prev, [chain]: true }));
-    setSplitResults(prev => ({ ...prev, [chain]: {} as any }));
+    setSplittingBilateral(true);
+    setBilateralSplitResult(null);
 
+    const net = getNetwork();
+    const ownerKeyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+    const pubKey = Buffer.from(ownerKeyPair.publicKey);
+    const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
+
+    const inputSats = BigInt(selectedUtxoToSplit.amount);
+    const fee = BigInt(2000);
+    const outputSats = inputSats - fee;
+
+    let mainTxid = '';
+    let mainError = '';
+    let mainSuccess = false;
+
+    // We ONLY perform the script-spend split spend on the Main-Chain (Bitcoin Core)
+    // The previous pre-fork UTXO will remain valid and unspent on BIP110-Chain because the split-spend is rejected.
     try {
-      const targetUtxo = [...utxos].sort((a, b) => b.amount - a.amount)[0];
-      const net = getNetwork();
+      const txMain = PureBitcoinSwap.buildScriptpathSplitTx(
+        ownerKeyPair,
+        selectedUtxoToSplit.txid,
+        selectedUtxoToSplit.vout,
+        inputSats,
+        outputSats,
+        ownAddress,
+        splitPayment.payment,
+        splitPayment.script,
+        net
+      );
 
-      // Perform transaction construction and signing 100% locally on the client!
-      const ownerKeyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
-      const pubKey = Buffer.from(ownerKeyPair.publicKey);
-      const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
-
-      const inputSats = BigInt(targetUtxo.amount);
-      const fee = BigInt(2000);
-      const outputSats = inputSats - fee;
-
-      let tx: bitcoin.Transaction;
-      if (chain === 'main') {
-        tx = PureBitcoinSwap.buildScriptpathSplitTx(
-          ownerKeyPair,
-          targetUtxo.txid,
-          targetUtxo.vout,
-          inputSats,
-          outputSats,
-          splitDestAddr,
-          splitPayment.payment,
-          splitPayment.script,
-          net
-        );
-      } else {
-        tx = PureBitcoinSwap.buildKeypathSplitTx(
-          ownerKeyPair,
-          targetUtxo.txid,
-          targetUtxo.vout,
-          inputSats,
-          outputSats,
-          splitDestAddr,
-          splitPayment.payment,
-          splitPayment.script,
-          net
-        );
-      }
-
-      const hex = tx.toHex();
-
-      // Post the locally-signed raw transaction hex to the server to broadcast
-      const resBroadcast = await axios.post(`${API_BASE}/tx/broadcast`, {
-        hex,
-        chain,
-        networkMode
+      const resMain = await axios.post(`${API_BASE}/tx/broadcast`, {
+        hex: txMain.toHex(),
+        chain: 'main',
+        networkMode,
+        isSplit: true
       });
 
-      setSplitResults(prev => ({
-        ...prev,
-        [chain]: { success: true, txid: resBroadcast.data.txid }
-      }));
-      showToast(`Split spent successfully broadcasted on ${chain === 'main' ? 'Bitcoin' : 'BIP110'}!`, 'success');
-      await fetchBalances();
+      mainTxid = resMain.data.txid;
+      mainSuccess = true;
     } catch (err: any) {
-      setSplitResults(prev => ({
-        ...prev,
-        [chain]: { success: false, error: err.message }
-      }));
-      showToast(`Split spend failed: ${err.message}`, 'error');
-    } finally {
-      setSplitting(prev => ({ ...prev, [chain]: false }));
+      mainError = err.message;
     }
+
+    setBilateralSplitResult({
+      mainSuccess,
+      mainTxid,
+      mainError
+    });
+
+    if (mainSuccess) {
+      showToast('Scriptpath split successfully broadcasted on Main-Chain! BIP110 previous UTXO is now marked as split.', 'success');
+    } else {
+      showToast('Bilateral split failed: ' + mainError, 'error');
+    }
+
+    setSelectedUtxoToSplit(null);
+    await fetchBalances();
+    setSplittingBilateral(false);
   };
 
   const handleCreateOffer = async (e: React.FormEvent) => {
@@ -372,7 +422,7 @@ export default function App() {
       const res = await axios.post(`${API_BASE}/offers/${offerId}/accept`, {
         acceptorPubKey: publicKey
       });
-      showToast('Offer accepted! Launching the Atomic Swap Wizard...', 'success');
+      showToast('Offer accepted! Launching the Swap Wizard...', 'success');
       setSelectedOffer(res.data);
       setActiveTab('wizard');
       await fetchOffers();
@@ -401,14 +451,10 @@ export default function App() {
         );
 
         // 2. Fetch split UTXOs of initiator on Knots
-        const splitDestRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: splitDestAddr || splitAddress,
-          chain: 'bip110',
-          networkMode
-        });
-        
-        const utxo = splitDestRes.data.utxos[0];
-        if (!utxo) throw new Error("No split UTXO found on BIP110-Chain! Perform your split first.");
+        // Under our protocol, the split B110 coin is the original unspent contract UTXO on splitAddress (since the main split spend was rejected).
+        const splitB110Utxos = bip110Utxos.filter(u => isBip110UtxoSplit(u));
+        const utxo = splitB110Utxos[0];
+        if (!utxo) throw new Error("No split UTXO found on BIP110-Chain! Split your coins first on Main-Chain.");
 
         // 3. Build & sign funding transaction locally!
         const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
@@ -418,6 +464,7 @@ export default function App() {
           network: net
         });
 
+        // The funding tx spends the unspent contract UTXO directly from splitAddress via Keypath (tweaked key)
         const tx = PureBitcoinSwap.buildHtlcFundingTx(
           keyPair,
           utxo.txid,
@@ -461,15 +508,15 @@ export default function App() {
           net
         );
 
-        // 2. Fetch split outputs of acceptor on Core
+        // 2. Fetch split outputs of acceptor on Core (spending from their ownAddress)
         const splitDestRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: splitDestAddr || splitAddress,
+          address: ownAddress,
           chain: 'main',
           networkMode
         });
         
         const utxo = splitDestRes.data.utxos[0];
-        if (!utxo) throw new Error("No split UTXO found on Bitcoin! Perform your split first.");
+        if (!utxo) throw new Error("No split UTXO found on Bitcoin! Split your coins first.");
 
         // 3. Build & sign funding transaction locally!
         const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
@@ -541,7 +588,7 @@ export default function App() {
           utxo.vout,
           BigInt(utxo.amount),
           BigInt(utxo.amount - 2000), 
-          splitDestAddr || splitAddress,
+          ownAddress, // Claim destination is user's own address!
           Buffer.from(selectedOffer.hashLock, 'hex'),
           Buffer.from(savedPreimage, 'hex'), 
           htlcPayment,
@@ -597,7 +644,7 @@ export default function App() {
           utxo.vout,
           BigInt(utxo.amount),
           BigInt(utxo.amount - 2000), 
-          splitDestAddr || splitAddress,
+          ownAddress, // Claim destination is user's own address!
           Buffer.from(selectedOffer.hashLock, 'hex'),
           Buffer.from(selectedOffer.preimage!, 'hex'), // preimage hex
           htlcPayment,
@@ -844,11 +891,21 @@ export default function App() {
                 <div className="mt-6 pt-4 border-t border-slate-800 flex gap-4">
                   <div className="flex-1">
                     <span className="text-xs text-slate-400 block mb-1">Main-Chain Balance</span>
-                    <span className="text-xl font-bold text-emerald-400">{(mainBalance / 100000000).toFixed(4)} {networkMode === 'mainnet' ? 'BTC' : 'rBTC'}</span>
+                    <span className="text-xl font-bold text-emerald-400">
+                      {((mainBalance + ownMainBalance) / 100000000).toFixed(4)} {networkMode === 'mainnet' ? 'BTC' : 'rBTC'}
+                    </span>
+                    <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
+                      {(mainBalance / 100000000).toFixed(4)} Unsplit + {(ownMainBalance / 100000000).toFixed(4)} Split
+                    </span>
                   </div>
                   <div className="flex-1 border-l border-slate-800 pl-4">
                     <span className="text-xs text-slate-400 block mb-1">BIP110 Balance</span>
-                    <span className="text-xl font-bold text-sky-400">{(bip110Balance / 100000000).toFixed(4)} B110</span>
+                    <span className="text-xl font-bold text-sky-400">
+                      {(bip110Balance / 100000000).toFixed(4)} B110
+                    </span>
+                    <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
+                      {(getBip110UnsplitBalance() / 100000000).toFixed(4)} Unsplit + {(getBip110SplitBalance() / 100000000).toFixed(4)} Split
+                    </span>
                   </div>
                 </div>
               </div>
@@ -869,14 +926,14 @@ export default function App() {
                   {/* Step 1: Fund Nodes */}
                   <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div className="max-w-md">
-                      <h4 className="text-xs font-bold text-slate-200 mb-1">Step 1: Bootstrap & Fund Node Miner Wallets</h4>
-                      <p className="text-[10px] text-slate-400">Mine 110 blocks of shared history. This funds the nodes with mature coinbase rewards so that they have coins to distribute via the faucet.</p>
+                      <h4 className="text-xs font-bold text-slate-200 mb-1">Step 1: Bootstrap BIP110 Consensus & Miner Wallets</h4>
+                      <p className="text-[10px] text-slate-400">Mine 450 blocks of shared history. This activates the native BIP110 (reduced_data) consensus rules on Knots (natively activates at block 432) and matures Coinbase miner rewards.</p>
                     </div>
                     <button
-                      onClick={() => mineBlocks('main', 110)}
+                      onClick={() => mineBlocks('main', 450)}
                       className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-start sm:self-center"
                     >
-                      Mine 110 blocks
+                      Mine 450 blocks
                     </button>
                   </div>
 
@@ -963,15 +1020,35 @@ export default function App() {
                 <div>
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2.5">Bitcoin UTXOs</h4>
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                    {mainUtxos.length === 0 ? (
+                    {mainUtxos.length === 0 && ownMainUtxos.length === 0 ? (
                       <div className="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-800 rounded-xl">No unspent outputs.</div>
                     ) : (
-                      mainUtxos.map((u, i) => (
-                        <div key={i} className="bg-slate-950 border border-slate-800/60 p-2.5 rounded-xl text-xs flex justify-between items-center">
-                          <span className="font-mono text-slate-400 truncate w-32">{u.txid}</span>
-                          <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
-                        </div>
-                      ))
+                      <div className="space-y-2">
+                        {/* Render Unsplit UTXOs */}
+                        {mainUtxos.map((u, i) => (
+                          <div key={`unsplit-${i}`} className="bg-slate-950 border border-slate-800/60 p-2.5 rounded-xl text-xs flex justify-between items-center">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
+                              <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
+                                ⏳ Unsplit
+                              </span>
+                            </div>
+                            <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
+                          </div>
+                        ))}
+                        {/* Render Already Split UTXOs */}
+                        {ownMainUtxos.map((u, i) => (
+                          <div key={`split-${i}`} className="bg-slate-900/40 border border-emerald-950 p-2.5 rounded-xl text-xs flex justify-between items-center shadow-sm shadow-emerald-500/5">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
+                              <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-950/30 border border-emerald-800/40 text-emerald-400 animate-pulse">
+                                🛡️ Split
+                              </span>
+                            </div>
+                            <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -979,15 +1056,36 @@ export default function App() {
                 <div>
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2.5">BIP110 UTXOs</h4>
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                    {bip110Utxos.length === 0 ? (
+                    {bip110Utxos.length === 0 && ownBip110Utxos.length === 0 ? (
                       <div className="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-800 rounded-xl">No unspent outputs.</div>
                     ) : (
-                      bip110Utxos.map((u, i) => (
-                        <div key={i} className="bg-slate-950 border border-slate-800/60 p-2.5 rounded-xl text-xs flex justify-between items-center">
-                          <span className="font-mono text-slate-400 truncate w-32">{u.txid}</span>
-                          <span className="font-semibold text-sky-400">{(u.amount / 100000000).toFixed(4)} B110</span>
-                        </div>
-                      ))
+                      <div className="space-y-2">
+                        {/* Render BIP110 UTXOs with dynamic split check */}
+                        {bip110Utxos.map((u, i) => {
+                          const isSplit = isBip110UtxoSplit(u);
+                          return (
+                            <div key={`b110-${i}`} className={`p-2.5 rounded-xl text-xs flex justify-between items-center ${
+                              isSplit 
+                                ? 'bg-slate-900/40 border border-sky-950 shadow-sm shadow-sky-500/5' 
+                                : 'bg-slate-950 border border-slate-800/60'
+                            }`}>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
+                                {isSplit ? (
+                                  <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-sky-950/30 border border-sky-800/40 text-sky-400 animate-pulse">
+                                    🛡️ Split
+                                  </span>
+                                ) : (
+                                  <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
+                                    ⏳ Unsplit
+                                  </span>
+                                )}
+                              </div>
+                              <span className="font-semibold text-sky-400">{(u.amount / 100000000).toFixed(4)} B110</span>
+                            </div>
+                          )
+                        })}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1002,125 +1100,148 @@ export default function App() {
             <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
               <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
                 <Layers className="w-5 h-5 text-indigo-400" />
-                The Replay-Protected Coin Splitter
+                Bilateral Replay-Proof Coin Splitter
               </h3>
               <p className="text-xs text-slate-400 mb-6">
-                Before participating in an atomic swap, users must split their coins. This ensures funded HTLC outputs cannot be maliciously replayed on the opposing chain. All transaction construction and signing occurs 100% locally in your browser.
+                Both the Initiator and the Acceptor must split their coins by script-spending their P2TR split contract outputs to their own safe addresses. This makes their balances 100% replay-protected and safe to fund HTLCs.
               </p>
 
-              {/* Destination Address Config */}
-              <div className="mb-8 max-w-xl">
-                <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Destination Split Address</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={splitDestAddr}
-                    onChange={(e) => setSplitDestAddr(e.target.value)}
-                    placeholder="Enter offline P2TR address (e.g. your derived split address)"
-                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
-                  />
-                  <button 
-                    onClick={() => setSplitDestAddr(splitAddress)}
-                    className="px-3 py-2 text-xs font-semibold rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 transition-all"
-                  >
-                    Use Own Address
+              {/* Dynamic Read-only Split Destination Panel */}
+              <div className="bg-slate-950/60 border border-slate-850 p-5 rounded-xl mb-8">
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center gap-2">
+                  <UserCheck className="w-4 h-4 text-sky-400" />
+                  Destination Split Address
+                </h4>
+                <div className="bg-slate-950 border border-slate-900 px-3 py-2 rounded-xl flex items-center justify-between font-mono text-xs text-sky-300">
+                  <span className="truncate mr-4 font-semibold">{ownAddress || 'Computing address...'}</span>
+                  <button onClick={() => copyToClipboard(ownAddress)} className="text-slate-500 hover:text-slate-300">
+                    <Copy className="w-4 h-4" />
                   </button>
                 </div>
               </div>
 
-              {/* Split Panel Dual Column */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Main-Chain Column */}
-                <div className="bg-slate-950/40 border border-slate-850 p-5 rounded-2xl flex flex-col justify-between">
-                  <div>
-                    <span className="text-xs font-bold text-emerald-400 uppercase bg-emerald-950/40 px-2 py-0.5 border border-emerald-900/60 rounded-md">
-                      Main-Chain Spend Path
-                    </span>
-                    <h4 className="text-md font-semibold text-slate-200 mt-3 mb-1">
-                      Scriptpath MAST Leaf Spend
-                    </h4>
-                    <p className="text-xs text-slate-400 mb-4">
-                      Employs the `OP_IF` branch of the MAST tree. This is fully standard and valid on the Bitcoin Core node.
-                    </p>
-
-                    <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[10px] text-slate-400 space-y-1 mb-6">
-                      <div>OP_IF</div>
-                      <div className="text-rose-400">  OP_RETURN (Banned on Knots)</div>
-                      <div>OP_ELSE</div>
-                      <div>  &lt;pubKey&gt; OP_CHECKSIG</div>
-                      <div>OP_ENDIF</div>
+              {/* UTXO Selection Table / Radio-List */}
+              <div className="space-y-6">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
+                    Available Contract UTXOs (Select the UTXO to split)
+                  </h4>
+                  
+                  {/* We only allow selecting UNSPLIT UTXOs. A UTXO is unsplit if it is present on the Main-Chain */}
+                  {mainUtxos.length === 0 ? (
+                    <div className="text-center py-8 border border-dashed border-slate-800 bg-slate-950/40 rounded-xl text-xs text-slate-500">
+                      No unsplit contract outputs available on Main-Chain. Deposit some funds via the faucet tab first!
                     </div>
-                  </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-3">
+                      {mainUtxos.map((u, idx) => {
+                        const isSelected = selectedUtxoToSplit?.txid === u.txid && selectedUtxoToSplit?.vout === u.vout;
+                        return (
+                          <div 
+                            key={idx}
+                            onClick={() => setSelectedUtxoToSplit(u)}
+                            className={`p-4 rounded-xl border cursor-pointer transition-all flex justify-between items-center ${
+                              isSelected 
+                                ? 'bg-indigo-950/30 border-indigo-500 shadow-md shadow-indigo-500/5' 
+                                : 'bg-slate-950 border-slate-850 hover:border-slate-800'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className={`w-4 h-4 rounded-full border flex items-center justify-center ${isSelected ? 'border-indigo-500' : 'border-slate-700'}`}>
+                                {isSelected && <div className="w-2 h-2 rounded-full bg-indigo-400" />}
+                              </div>
+                              <div className="flex flex-col">
+                                <span className="font-mono text-slate-300 text-xs truncate w-48 sm:w-80">{u.txid}:{u.vout}</span>
+                                <span className="text-[10px] text-slate-500">Confirmations: {u.confirmations}</span>
+                              </div>
+                            </div>
+                            <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
 
-                  <div className="space-y-4">
-                    <button
-                      onClick={() => executeSplit('main')}
-                      disabled={splitting['main']}
-                      className="w-full py-2.5 text-xs font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all shadow-lg shadow-emerald-600/10"
-                    >
-                      {splitting['main'] ? 'Broadcasting...' : 'Execute Scriptpath Split (Main-Chain)'}
-                    </button>
+                {/* Show already split UTXOs as non-selectable */}
+                <div>
+                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
+                    Already Split UTXOs (Replay-Protected)
+                  </h4>
+                  <div className="space-y-2">
+                    {/* Render split UTXOs on Main-Chain */}
+                    {ownMainUtxos.map((u, i) => (
+                      <div key={`split-main-tab-${i}`} className="bg-slate-900/30 border border-emerald-950/50 p-3.5 rounded-xl text-xs flex justify-between items-center opacity-80">
+                        <div className="flex items-center gap-3">
+                          <div className="flex flex-col">
+                            <span className="font-mono text-slate-300 text-xs truncate w-32 sm:w-64">{u.txid}:{u.vout}</span>
+                            <span className="text-[10px] text-slate-500">Confirmations: {u.confirmations}</span>
+                          </div>
+                          <span className="text-[9px] font-bold text-emerald-400 bg-emerald-950/30 border border-emerald-900/40 px-2 py-0.5 rounded self-start">
+                            🛡️ Split (Core)
+                          </span>
+                        </div>
+                        <span className="font-semibold text-slate-300">{(u.amount / 100000000).toFixed(4)} BTC</span>
+                      </div>
+                    ))}
+                    
+                    {/* Render split UTXOs on BIP110-Chain */}
+                    {bip110Utxos.filter(u => isBip110UtxoSplit(u)).map((u, i) => (
+                      <div key={`split-b110-tab-${i}`} className="bg-slate-900/30 border border-sky-950/50 p-3.5 rounded-xl text-xs flex justify-between items-center opacity-80">
+                        <div className="flex items-center gap-3">
+                          <div className="flex flex-col">
+                            <span className="font-mono text-slate-300 text-xs truncate w-32 sm:w-64">{u.txid}:{u.vout}</span>
+                            <span className="text-[10px] text-slate-500">Confirmations: {u.confirmations}</span>
+                          </div>
+                          <span className="text-[9px] font-bold text-sky-400 bg-sky-950/30 border border-sky-900/40 px-2 py-0.5 rounded self-start">
+                            🛡️ Split (BIP110)
+                          </span>
+                        </div>
+                        <span className="font-semibold text-slate-300">{(u.amount / 100000000).toFixed(4)} B110</span>
+                      </div>
+                    ))}
 
-                    {splitResults['main'] && (
-                      <div className={`p-3 rounded-xl border text-xs font-mono ${
-                        splitResults['main'].success 
-                          ? 'bg-emerald-950/40 border-emerald-800 text-emerald-300' 
-                          : 'bg-rose-950/40 border-rose-800 text-rose-300'
-                      }`}>
-                        {splitResults['main'].success ? (
-                          <div className="truncate">Success! Txid: {splitResults['main'].txid}</div>
-                        ) : (
-                          <div>Failed: {splitResults['main'].error}</div>
-                        )}
+                    {ownMainUtxos.length === 0 && bip110Utxos.filter(u => isBip110UtxoSplit(u)).length === 0 && (
+                      <div className="text-center py-6 border border-slate-900 bg-slate-950/20 rounded-xl text-xs text-slate-600">
+                        No split UTXOs detected yet. Select an unsplit UTXO above to split!
                       </div>
                     )}
                   </div>
                 </div>
 
-                {/* Knots/BIP110 Column */}
-                <div className="bg-slate-950/40 border border-slate-850 p-5 rounded-2xl flex flex-col justify-between">
-                  <div>
-                    <span className="text-xs font-bold text-sky-400 uppercase bg-sky-950/40 px-2 py-0.5 border border-sky-900/60 rounded-md">
-                      BIP110 consensus Path
-                    </span>
-                    <h4 className="text-md font-semibold text-slate-200 mt-3 mb-1">
-                      Keypath Tweaked Key Spend
-                    </h4>
-                    <p className="text-xs text-slate-400 mb-4">
-                      Spends the P2TR UTXO using the tweaked keypath signature. Since there are zero script opcodes, it compiles smoothly on BIP110-Chain.
-                    </p>
+                {/* Single Split Spends Action Button */}
+                <div className="pt-4">
+                  <button
+                    onClick={executeBilateralSplit}
+                    disabled={splittingBilateral || !selectedUtxoToSplit}
+                    className="w-full sm:w-auto px-6 py-3 font-semibold text-sm rounded-xl text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/10"
+                  >
+                    {splittingBilateral ? 'Executing Main-Chain Scriptpath Spend...' : 'Split Coins (Scriptpath Spend)'}
+                  </button>
+                </div>
 
-                    <div className="bg-slate-950 p-3 rounded-xl border border-slate-900 font-mono text-[10px] text-slate-400 space-y-1 mb-6">
-                      <div className="text-sky-400">// Pure keypath spend utilizing:</div>
-                      <div>Tweaked Key: P_tweaked = P_internal + H(P_internal || MerkleRoot)</div>
-                      <div>Witness: [ &lt;Schnorr Signature&gt; ]</div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    <button
-                      onClick={() => executeSplit('bip110')}
-                      disabled={splitting['bip110']}
-                      className="w-full py-2.5 text-xs font-semibold rounded-xl bg-sky-600 hover:bg-sky-500 text-white transition-all shadow-lg shadow-sky-600/10"
-                    >
-                      {splitting['bip110'] ? 'Broadcasting...' : 'Execute Keypath Split (BIP110-Chain)'}
-                    </button>
-
-                    {splitResults['bip110'] && (
-                      <div className={`p-3 rounded-xl border text-xs font-mono ${
-                        splitResults['bip110'].success 
-                          ? 'bg-sky-950/40 border-sky-800 text-sky-300' 
-                          : 'bg-rose-950/40 border-rose-800 text-rose-300'
-                      }`}>
-                        {splitResults['bip110'].success ? (
-                          <div className="truncate">Success! Txid: {splitResults['bip110'].txid}</div>
+                {/* Bilateral Split Spend results */}
+                {bilateralSplitResult && (
+                  <div className="mt-6 border border-slate-800 bg-slate-950 p-5 rounded-2xl space-y-4">
+                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Split spend Results Summary</h4>
+                    
+                    <div className="grid grid-cols-1 gap-4 text-xs font-mono">
+                      <div className={`p-4 rounded-xl border ${bilateralSplitResult.mainSuccess ? 'bg-emerald-950/20 border-emerald-900/60 text-emerald-300' : 'bg-rose-950/20 border-rose-900/60 text-rose-300'}`}>
+                        <span className="font-bold block mb-1">Bitcoin Core (Main-Chain Scriptpath spend):</span>
+                        {bilateralSplitResult.mainSuccess ? (
+                          <div>
+                            <div className="truncate mb-1">✔️ Success! Split Txid: {bilateralSplitResult.mainTxid}</div>
+                            <div className="text-[10px] text-slate-400 leading-normal mt-2">
+                              Because this transaction contains the banned OP_IF opcode in its scriptpath, the BIP110-Chain (Knots) will reject it entirely. This guarantees that your original pre-fork UTXO remains unspent, valid, and fully split on Knots!
+                            </div>
+                          </div>
                         ) : (
-                          <div>Failed: {splitResults['bip110'].error}</div>
+                          <div>Failed: {bilateralSplitResult.mainError}</div>
                         )}
                       </div>
-                    )}
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             </div>
           </div>
@@ -1370,11 +1491,11 @@ export default function App() {
                         </p>
                       </div>
                       <div className="flex gap-2">
-                        <span className={`text-xs font-semibold px-2 py-1 rounded border ${mainBalance > 0 ? 'bg-emerald-950/40 border-emerald-900/60 text-emerald-400' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
-                          {mainBalance > 0 ? 'BTC Split Ready' : 'BTC Split Pending'}
+                        <span className={`text-xs font-semibold px-2 py-1 rounded border ${ownMainBalance > 0 ? 'bg-emerald-950/40 border-emerald-900/60 text-emerald-400' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
+                          {ownMainBalance > 0 ? 'BTC Split Ready' : 'BTC Split Pending'}
                         </span>
-                        <span className={`text-xs font-semibold px-2 py-1 rounded border ${bip110Balance > 0 ? 'bg-sky-950/40 border-sky-900/60 text-sky-400' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
-                          {bip110Balance > 0 ? 'B110 Split Ready' : 'B110 Split Pending'}
+                        <span className={`text-xs font-semibold px-2 py-1 rounded border ${getBip110SplitBalance() > 0 ? 'bg-sky-950/40 border-sky-900/60 text-sky-400' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
+                          {getBip110SplitBalance() > 0 ? 'B110 Split Ready' : 'B110 Split Pending'}
                         </span>
                       </div>
                     </div>
