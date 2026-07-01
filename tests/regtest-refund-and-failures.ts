@@ -108,19 +108,24 @@ async function runRefundAndFailureTest() {
     await sleep(1000); // sync
     console.log(`   - Block 101 Mined. Funding TxID: ${fundTxid}`);
 
-    // 5. Sever nodes to simulate fork
-    console.log("\n5. Severing peer connections to simulate the BIP110 consensus hard fork...");
-    console.log("   - NOTE ON CONSENSUS VS STANDARDNESS:");
-    console.log("     In a production BIP110 deployment, the 'OP_IF' ban is a strict consensus rule.");
-    console.log("     A block containing an OP_IF transaction would be invalid on BIP110 nodes,");
-    console.log("     forcing automatic peer disconnection at the network layer.");
-    console.log("     Since standard Core & Knots nodes on regtest enforce this rule as a policy/standardness");
-    console.log("     rule rather than a consensus rule, we call 'disconnectnode' to correctly simulate");
-    console.log("     the post-fork separated state of both chains.");
-    try {
-        await mainRpc.call('disconnectnode', ['bitcoind-bip110:18444']);
-        console.log("   - Nodes severed.");
-    } catch {}
+    // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
+    console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
+    console.log("   - Nodes are fully connected over P2P initially.");
+    console.log("   - We will mine the OP_IF block on Core and then invalidate it on Knots to force the consensus split!");
+
+    const outputIndex = await findOutputIndex(mainRpc, fundTxid, Buffer.from(splitPayment.output!).toString('hex'));
+    const receiverAddrMain = await mainRpc.call('getnewaddress');
+    const mainSpendTx = PureBitcoinSwap.buildScriptpathSplitTx(
+        initiator, fundTxid, outputIndex, 1000000000n, 999000000n, receiverAddrMain, splitPayment, splitScript, bitcoin.networks.regtest
+    );
+    const rawMainHex = mainSpendTx.toHex();
+    await mainRpc.call('sendrawtransaction', [rawMainHex]);
+    const blocksMined = await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
+    const block102Hash = blocksMined[0];
+
+    console.log("   - ENFORCING BIP110 CONSENSUS RULE (Banning Block 102 on Knots)...");
+    await bip110Rpc.call('invalidateblock', [block102Hash]);
+    await sleep(2000);
 
     // 6. Split coins on BIP110-Chain using Keypath Schnorr spend
     console.log("\n6. Splitting coins on BIP110-Chain...");

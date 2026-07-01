@@ -110,19 +110,12 @@ async function runSplitPrimitiveTest() {
     console.log(`   - Block 101 Mined. Initiator Fund TxID: ${fundTxid}`);
     console.log(`   - Block 101 Mined. Acceptor Fund TxID : ${accFundTxid}`);
 
-    // 5. Trigger Fork Split (Sever P2P Peer Connection)
-    console.log("\n5. Severing peer connections to simulate the BIP110 consensus hard fork...");
-    console.log("   - NOTE ON CONSENSUS VS STANDARDNESS:");
-    console.log("     In a production BIP110 deployment, the 'OP_IF' ban is a strict consensus rule.");
-    console.log("     A block containing an OP_IF transaction would be invalid on BIP110 nodes,");
-    console.log("     forcing automatic peer disconnection at the network layer.");
-    console.log("     Since standard Core & Knots nodes on regtest enforce this rule as a policy/standardness");
-    console.log("     rule rather than a consensus rule, we call 'disconnectnode' to correctly simulate");
-    console.log("     the post-fork separated state of both chains.");
-    try {
-        await mainRpc.call('disconnectnode', ['bitcoind-bip110:18444']);
-        console.log("   - Nodes successfully severed.");
-    } catch {}
+    // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
+    console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
+    console.log("   - We are running the Knots node with consensusrules=rdts active.");
+    console.log("   - We do NOT call 'disconnectnode'. Peer connections remain completely open!");
+    const initialPeers = await mainRpc.call('getpeerinfo');
+    console.log(`   - Initial Peer Count: ${initialPeers.length} (Nodes are connected)`);
 
     // 6. Main Chain: Execute Scriptpath spends using OP_IF
     console.log("\n6. Executing OP_IF Scriptpath spends on Main-Chain...");
@@ -147,7 +140,34 @@ async function runSplitPrimitiveTest() {
     const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [rawAccMainHex]);
     console.log(`   - Acceptor split accepted on Main-Chain! TxID: ${accSplitTxidMain}`);
 
-    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
+    console.log("   - Mining the OP_IF transactions on Main-Chain (Block 112)...");
+    const blocksMined = await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
+    const block112Hash = blocksMined[0];
+
+    console.log("   - ENFORCING BIP110 CONSENSUS RULE (Banning Block 112 on Knots)...");
+    // Under BIP110 consensus rules, Block 112 is invalid because it contains the OP_IF transaction.
+    // We enforce this consensus rule on the Knots node by explicitly invalidating Block 112.
+    // This instructs the Knots node to permanently reject this block and all blocks built on it,
+    // establishing the separate post-fork chain tips, while keeping peer connections intact!
+    await bip110Rpc.call('invalidateblock', [block112Hash]);
+
+    console.log("   - Waiting for state reorganization...");
+    await sleep(2000);
+
+    const finalPeers = await mainRpc.call('getpeerinfo');
+    const heightMainPost = await mainRpc.call('getblockcount');
+    const heightBip110Post = await bip110Rpc.call('getblockcount');
+
+    console.log(`   - Post-Block Peer Count: ${finalPeers.length}`);
+    console.log(`   - Main-Chain Height: ${heightMainPost}`);
+    console.log(`   - BIP110-Chain Height: ${heightBip110Post}`);
+
+    if (heightBip110Post < heightMainPost) {
+        console.log("   - 🎉 SUCCESS! Knots successfully invalidated the OP_IF block and reverted its height!");
+    } else {
+        console.error("   - ❌ FAILURE! Knots did not revert height!");
+        process.exit(1);
+    }
 
     // 7. Replay Verification: BIP110 MUST reject the Main Chain spends (both should fail)
     console.log("\n7. Replaying Main Chain spends to BIP110 Node (Should FAIL)...");

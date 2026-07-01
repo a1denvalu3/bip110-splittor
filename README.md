@@ -39,7 +39,7 @@ The protocol establishes a perfect, mirror-image cryptographic locking mechanism
 
 ---
 
-## Script Leaf Specifications (No sCrypt, Hyper-Optimized)
+## Script Leaf Specifications
 
 By eliminating sCrypt boilerplate and hand-crafting script elements, we achieve extremely compact, fee-efficient bytecode sizes:
 
