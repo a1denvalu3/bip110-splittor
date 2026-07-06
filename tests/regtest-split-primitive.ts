@@ -80,7 +80,7 @@ async function runSplitPrimitiveTest() {
         await sleep(2000);
     } catch {}
 
-    // 3. Shared ancestry blocks 1-110
+    // 3. Shared ancestry blocks 1-110 (Activates BIP110 consensus rules on Knots from genesis)
     console.log("\n3. Mining 110 blocks of shared history...");
     const sharedMinerAddr = await mainRpc.call('getnewaddress');
     await mainRpc.call('generatetoaddress', [110, sharedMinerAddr]);
@@ -95,7 +95,7 @@ async function runSplitPrimitiveTest() {
     }
     console.log(`   - Main Height: ${heightMain}, BIP110 Height: ${heightBip110}`);
 
-    // 4. Create and Fund Split Output (Block 101)
+    // 4. Create and Fund Split Output
     console.log("\n4. Funding the Split outputs for Initiator and Acceptor with 10 BTC each...");
     const initiator = PureBitcoinSwap.generateKeyPair();
     const { payment: splitPayment, script: splitScript } = PureBitcoinSwap.createSplitPayment(Buffer.from(initiator.publicKey), bitcoin.networks.regtest);
@@ -111,8 +111,8 @@ async function runSplitPrimitiveTest() {
     const accFundTxid = await mainRpc.call('sendtoaddress', [accSplitAddress, 10.0]);
     await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
     await sleep(1000); // sync
-    console.log(`   - Block 101 Mined. Initiator Fund TxID: ${fundTxid}`);
-    console.log(`   - Block 101 Mined. Acceptor Fund TxID : ${accFundTxid}`);
+    console.log(`   - Fund Block Mined. Initiator Fund TxID: ${fundTxid}`);
+    console.log(`   - Fund Block Mined. Acceptor Fund TxID : ${accFundTxid}`);
 
     // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
     console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
@@ -143,24 +143,10 @@ async function runSplitPrimitiveTest() {
     const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [rawAccMainHex]);
     console.log(`   - Acceptor split accepted on Main-Chain! TxID: ${accSplitTxidMain}`);
 
-    console.log("   - Mining the OP_IF transactions on Main-Chain (Block 112)...");
-    const blocksMined = await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
-    const block112Hash = blocksMined[0];
+    console.log("   - Mining the OP_IF transactions on Main-Chain...");
+    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
 
-    console.log("   - ENFORCING BIP110 CONSENSUS RULE (Banning Block 112 on Knots)...");
-    // Under BIP110 consensus rules, Block 112 is invalid because it contains the OP_IF transaction.
-    // We enforce this consensus rule on the Knots node by explicitly invalidating Block 112.
-    // This instructs the Knots node to permanently reject this block and all blocks built on it,
-    // establishing the separate post-fork chain tips, while keeping peer connections intact!
-    try {
-        await bip110Rpc.call('invalidateblock', [block112Hash]);
-    } catch (err: any) {
-        if (err.message.includes('Block not found')) {
-            console.log("   - Knots already natively rejected the invalid block containing OP_IF (BIP110 consensus enforced).");
-        } else {
-            throw err;
-        }
-    }
+    console.log("   - Knots natively rejects the invalid block containing OP_IF (BIP110 consensus enforced).");
 
     console.log("   - Waiting for state reorganization...");
     await sleep(2000);

@@ -26,6 +26,7 @@ import {
   Globe,
   Flame,
   UserCheck,
+  User,
   Check
 } from 'lucide-react';
 
@@ -58,11 +59,15 @@ interface Offer {
   preimage?: string;
   networkMode: 'mainnet' | 'regtest';
   createdAt: number;
+  backingTxid?: string;
+  backingVout?: number;
+  backingChain?: 'main' | 'bip110';
+  isPending?: boolean;
 }
 
 export default function App() {
   // Navigation & Network Mode
-  const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'wizard'>('wallet');
+  const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard'>('wallet');
   const [networkMode, setNetworkMode] = useState<'mainnet' | 'regtest'>('regtest');
 
   // Wallet State
@@ -96,7 +101,7 @@ export default function App() {
   } | null>(null);
 
   // Faucet & Block Mining (Regtest only)
-  const [faucetAmount, setFaucetAmount] = useState<string>('100000000'); // 1 BTC/B110 in sats
+  const [faucetAmount, setFaucetAmount] = useState<string>('1000000000'); // 10 BTC/B110 in sats
   const [faucetLoading, setFaucetLoading] = useState<Record<string, boolean>>({});
 
   // Marketplace State
@@ -104,11 +109,12 @@ export default function App() {
   const [selectedOffer, setSelectedOffer] = useState<Offer | null>(null);
   
   // Offer Form
-  const [newOfferB110, setNewOfferB110] = useState<string>('50000000'); // 0.5 B110
+  const [newOfferB110, setNewOfferB110] = useState<string>(''); // Auto-calculated from split UTXO
   const [newOfferBtc, setNewOfferBtc] = useState<string>('50000000'); // 0.5 BTC
   const [newOfferPreimage, setNewOfferPreimage] = useState<string>('secret-swap-preimage-proof');
   const [newOfferLocktime, setNewOfferLocktime] = useState<string>('2000');
   const [publishing, setPublishing] = useState<boolean>(false);
+  const [selectedBackingUtxoKey, setSelectedBackingUtxoKey] = useState<string>('');
 
   // Toast notifications
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -136,6 +142,69 @@ export default function App() {
     return bip110Utxos
       .filter(u => !isBip110UtxoSplit(u))
       .reduce((sum, u) => sum + u.amount, 0);
+  };
+
+  // Helper to get all available split UTXOs on either chain/address
+  const getAvailableSplitUtxos = () => {
+    const list: { txid: string; vout: number; amount: number; chain: 'main' | 'bip110'; address: string }[] = [];
+    
+    // 1. Add BIP110-Chain split UTXOs on ownAddress
+    ownBip110Utxos.forEach(u => {
+      if (!list.some(item => item.txid === u.txid && item.vout === u.vout)) {
+        list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'bip110', address: ownAddress });
+      }
+    });
+    
+    // 2. Add BIP110-Chain split UTXOs on splitAddress
+    bip110Utxos.filter(u => isBip110UtxoSplit(u)).forEach(u => {
+      if (!list.some(item => item.txid === u.txid && item.vout === u.vout)) {
+        list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'bip110', address: splitAddress });
+      }
+    });
+
+    // 3. Add Main-Chain split UTXOs on ownAddress
+    ownMainUtxos.forEach(u => {
+      if (!list.some(item => item.txid === u.txid && item.vout === u.vout)) {
+        list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'main', address: ownAddress });
+      }
+    });
+
+    return list;
+  };
+
+  // Helper to get matching split UTXO on the other chain for taker to accept an offer
+  const getMatchingTakerUtxo = (o: Offer): UTXO | null => {
+    console.log("getMatchingTakerUtxo - Offer ID:", o.id, "BackingChain:", o.backingChain, "B110Amount:", o.initiatorB110Amount, "BtcAmount:", o.acceptorBtcAmount);
+    console.log("Taker Split UTXOs - BTC (ownMainUtxos):", ownMainUtxos);
+    console.log("Taker Split UTXOs - BIP110 (ownBip110Utxos):", ownBip110Utxos);
+    console.log("Taker Split UTXOs - BIP110 on splitAddress (isBip110UtxoSplit):", bip110Utxos.filter(u => isBip110UtxoSplit(u)));
+
+    if (o.backingChain === 'bip110') {
+      const match = ownMainUtxos.find(u => u.amount >= o.acceptorBtcAmount);
+      return match || null;
+    } else if (o.backingChain === 'main') {
+      const splitBip110Utxos = [
+        ...ownBip110Utxos,
+        ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
+      ];
+      // De-duplicate if any overlap
+      const uniqueBip110Utxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
+      const match = uniqueBip110Utxos.find(u => u.amount >= o.initiatorB110Amount);
+      return match || null;
+    } else {
+      // Robust Fallback (for older offers without backingChain explicitly populated)
+      // Check if taker has a matching split UTXO on EITHER chain!
+      const btcMatch = ownMainUtxos.find(u => u.amount >= o.acceptorBtcAmount);
+      if (btcMatch) return btcMatch;
+
+      const splitBip110Utxos = [
+        ...ownBip110Utxos,
+        ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
+      ];
+      const uniqueBip110Utxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
+      const b110Match = uniqueBip110Utxos.find(u => u.amount >= o.initiatorB110Amount);
+      return b110Match || null;
+    }
   };
 
   // Load saved keys from LocalStorage on mount or networkMode change
@@ -367,6 +436,15 @@ export default function App() {
     e.preventDefault();
     setPublishing(true);
     try {
+      if (!selectedBackingUtxoKey) {
+        throw new Error("Please select a split UTXO to back this offer.");
+      }
+      const [backingTxid, voutStr] = selectedBackingUtxoKey.split('-');
+      const backingVout = Number(voutStr);
+      
+      const utxo = getAvailableSplitUtxos().find(u => u.txid === backingTxid && u.vout === backingVout);
+      const backingChain = utxo?.chain;
+
       let preimageHex = '';
 
       if (networkMode === 'mainnet') {
@@ -394,13 +472,17 @@ export default function App() {
         acceptorBtcAmount: Number(newOfferBtc),
         hashLock: hashLockHex,
         lockTime: Number(newOfferLocktime),
-        networkMode
+        networkMode,
+        backingTxid,
+        backingVout,
+        backingChain
       });
 
       // Save preimage locally associated with Offer ID so we can claim later
       localStorage.setItem(`preimage_${res.data.id}`, preimageHex);
 
       showToast('Swap offer published successfully to the marketplace!', 'success');
+      setSelectedBackingUtxoKey('');
       await fetchOffers();
     } catch (err: any) {
       showToast('Publish offer failed: ' + err.message, 'error');
@@ -417,9 +499,17 @@ export default function App() {
     return bytes;
   };
 
-  const acceptOffer = async (offerId: string) => {
+  const acceptOffer = async (offer: Offer) => {
+    const match = getMatchingTakerUtxo(offer);
+    if (!match) {
+      const requiredChain = (!offer.backingChain || offer.backingChain === 'bip110') ? 'BTC' : 'BIP110';
+      const requiredAmount = (!offer.backingChain || offer.backingChain === 'bip110') ? offer.acceptorBtcAmount : offer.initiatorB110Amount;
+      showToast(`Cannot accept offer: you need a split ${requiredChain} UTXO with at least ${(requiredAmount / 100000000).toFixed(4)} to accept this offer!`, 'error');
+      return;
+    }
+
     try {
-      const res = await axios.post(`${API_BASE}/offers/${offerId}/accept`, {
+      const res = await axios.post(`${API_BASE}/offers/${offer.id}/accept`, {
         acceptorPubKey: publicKey
       });
       showToast('Offer accepted! Launching the Swap Wizard...', 'success');
@@ -451,20 +541,36 @@ export default function App() {
         );
 
         // 2. Fetch split UTXOs of initiator on Knots
-        // Under our protocol, the split B110 coin is the original unspent contract UTXO on splitAddress (since the main split spend was rejected).
-        const splitB110Utxos = bip110Utxos.filter(u => isBip110UtxoSplit(u));
-        const utxo = splitB110Utxos[0];
+        let utxo = bip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout)
+          || ownBip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
+
+        // Fallback if not found (e.g. legacy offers or edge cases)
+        if (!utxo) {
+          const splitB110Utxos = bip110Utxos.filter(u => isBip110UtxoSplit(u));
+          utxo = splitB110Utxos[0] || ownBip110Utxos[0];
+        }
+
         if (!utxo) throw new Error("No split UTXO found on BIP110-Chain! Split your coins first on Main-Chain.");
 
         // 3. Build & sign funding transaction locally!
         const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
-        const splitDestPubKey = Buffer.from(keyPair.publicKey);
-        const splitDestPayment = bitcoin.payments.p2tr({
-          internalPubkey: PureBitcoinSwap.getXOnlyPubKey(splitDestPubKey),
-          network: net
-        });
+        const pubKey = Buffer.from(keyPair.publicKey);
 
-        // The funding tx spends the unspent contract UTXO directly from splitAddress via Keypath (tweaked key)
+        let splitDestPayment: bitcoin.payments.Payment;
+        
+        // If the UTXO is on the P2TR split contract address itself, we must use split contract payment
+        const isParentSplitAddress = !ownBip110Utxos.some(u => u.txid === utxo!.txid && u.vout === utxo!.vout);
+        if (isParentSplitAddress) {
+          const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
+          splitDestPayment = splitPayment.payment;
+        } else {
+          splitDestPayment = bitcoin.payments.p2tr({
+            internalPubkey: PureBitcoinSwap.getXOnlyPubKey(pubKey),
+            network: net
+          });
+        }
+
+        // The funding tx spends the unspent contract UTXO via Keypath (tweaked key)
         const tx = PureBitcoinSwap.buildHtlcFundingTx(
           keyPair,
           utxo.txid,
@@ -773,10 +879,11 @@ export default function App() {
       <div className="border-b border-slate-900 bg-slate-950/60 sticky top-16 z-30 backdrop-blur-md">
         <div className="max-w-7xl mx-auto px-6 flex gap-1">
           {[
-            { id: 'wallet', label: networkMode === 'mainnet' ? '1. Secure Wallet' : '1. Deposit Faucet', icon: Wallet },
-            { id: 'splitter', label: '2. Bilateral Splitter', icon: Coins },
-            { id: 'marketplace', label: '3. Marketplace Offers', icon: TrendingUp },
-            { id: 'wizard', label: '4. Swap Wizard', icon: Award }
+                    { id: 'wallet', label: '1. Unified Wallet', icon: Wallet },
+                    { id: 'splitter', label: '2. Bilateral Splitter', icon: Coins },
+                    { id: 'marketplace', label: '3. Marketplace Lobby', icon: TrendingUp },
+                    { id: 'my-offers', label: '4. My Swaps & Offers', icon: User },
+                    { id: 'wizard', label: '5. Swap Wizard', icon: Award }
           ].map(tab => {
             const Icon = tab.icon;
             return (
@@ -1029,8 +1136,12 @@ export default function App() {
                           <div key={`unsplit-${i}`} className="bg-slate-950 border border-slate-800/60 p-2.5 rounded-xl text-xs flex justify-between items-center">
                             <div className="flex items-center gap-2">
                               <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
-                              <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
-                                ⏳ Unsplit
+                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                u.confirmations < 1 
+                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
+                                  : 'bg-slate-900 border border-slate-800 text-slate-400'
+                              }`}>
+                                {u.confirmations < 1 ? '⏳ PENDING' : '⏳ Unsplit'}
                               </span>
                             </div>
                             <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
@@ -1041,8 +1152,12 @@ export default function App() {
                           <div key={`split-${i}`} className="bg-slate-900/40 border border-emerald-950 p-2.5 rounded-xl text-xs flex justify-between items-center shadow-sm shadow-emerald-500/5">
                             <div className="flex items-center gap-2">
                               <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
-                              <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-950/30 border border-emerald-800/40 text-emerald-400 animate-pulse">
-                                🛡️ Split
+                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                u.confirmations < 1 
+                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
+                                  : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-400 animate-pulse'
+                              }`}>
+                                {u.confirmations < 1 ? '🛡️ PENDING' : '🛡️ Split'}
                               </span>
                             </div>
                             <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
@@ -1072,12 +1187,20 @@ export default function App() {
                               <div className="flex items-center gap-2">
                                 <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
                                 {isSplit ? (
-                                  <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-sky-950/30 border border-sky-800/40 text-sky-400 animate-pulse">
-                                    🛡️ Split
+                                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                    u.confirmations < 1 
+                                      ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
+                                      : 'bg-sky-950/30 border-sky-800/40 text-sky-400 animate-pulse'
+                                  }`}>
+                                    {u.confirmations < 1 ? '🛡️ PENDING' : '🛡️ Split'}
                                   </span>
                                 ) : (
-                                  <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
-                                    ⏳ Unsplit
+                                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                    u.confirmations < 1 
+                                      ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
+                                      : 'bg-slate-900 border border-slate-800 text-slate-400'
+                                  }`}>
+                                    {u.confirmations < 1 ? '⏳ PENDING' : '⏳ Unsplit'}
                                   </span>
                                 )}
                               </div>
@@ -1152,7 +1275,9 @@ export default function App() {
                               </div>
                               <div className="flex flex-col">
                                 <span className="font-mono text-slate-300 text-xs truncate w-48 sm:w-80">{u.txid}:{u.vout}</span>
-                                <span className="text-[10px] text-slate-500">Confirmations: {u.confirmations}</span>
+                                <span className="text-[10px] text-slate-500">
+                                  Confirmations: {u.confirmations} {u.confirmations < 1 && <span className="text-amber-500 font-bold ml-1.5 animate-pulse">(PENDING)</span>}
+                                </span>
                               </div>
                             </div>
                             <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
@@ -1175,10 +1300,16 @@ export default function App() {
                         <div className="flex items-center gap-3">
                           <div className="flex flex-col">
                             <span className="font-mono text-slate-300 text-xs truncate w-32 sm:w-64">{u.txid}:{u.vout}</span>
-                            <span className="text-[10px] text-slate-500">Confirmations: {u.confirmations}</span>
+                            <span className="text-[10px] text-slate-500">
+                              Confirmations: {u.confirmations} {u.confirmations < 1 && <span className="text-amber-500 font-bold ml-1.5 animate-pulse">(PENDING)</span>}
+                            </span>
                           </div>
-                          <span className="text-[9px] font-bold text-emerald-400 bg-emerald-950/30 border border-emerald-900/40 px-2 py-0.5 rounded self-start">
-                            🛡️ Split (Core)
+                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded self-start ${
+                            u.confirmations < 1
+                              ? 'bg-amber-950/30 border border-amber-900/40 text-amber-400 animate-pulse'
+                              : 'bg-emerald-950/30 border border-emerald-900/40 text-emerald-400'
+                          }`}>
+                            {u.confirmations < 1 ? '🛡️ Split (PENDING)' : '🛡️ Split (BTC)'}
                           </span>
                         </div>
                         <span className="font-semibold text-slate-300">{(u.amount / 100000000).toFixed(4)} BTC</span>
@@ -1191,10 +1322,16 @@ export default function App() {
                         <div className="flex items-center gap-3">
                           <div className="flex flex-col">
                             <span className="font-mono text-slate-300 text-xs truncate w-32 sm:w-64">{u.txid}:{u.vout}</span>
-                            <span className="text-[10px] text-slate-500">Confirmations: {u.confirmations}</span>
+                            <span className="text-[10px] text-slate-500">
+                              Confirmations: {u.confirmations} {u.confirmations < 1 && <span className="text-amber-500 font-bold ml-1.5 animate-pulse">(PENDING)</span>}
+                            </span>
                           </div>
-                          <span className="text-[9px] font-bold text-sky-400 bg-sky-950/30 border border-sky-900/40 px-2 py-0.5 rounded self-start">
-                            🛡️ Split (BIP110)
+                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded self-start ${
+                            u.confirmations < 1
+                              ? 'bg-amber-950/30 border border-amber-900/40 text-amber-400 animate-pulse'
+                              : 'bg-sky-950/30 border border-sky-900/40 text-sky-400'
+                          }`}>
+                            {u.confirmations < 1 ? '🛡️ Split (PENDING)' : '🛡️ Split (BIP110)'}
                           </span>
                         </div>
                         <span className="font-semibold text-slate-300">{(u.amount / 100000000).toFixed(4)} B110</span>
@@ -1260,68 +1397,220 @@ export default function App() {
                 Publish a sell contract. You sell BIP110 coins in exchange for Main-Chain Bitcoin.
               </p>
 
-              <form onSubmit={handleCreateOffer} className="grid grid-cols-1 md:grid-cols-4 gap-6 items-end">
+              <form onSubmit={handleCreateOffer} className="space-y-6">
                 <div>
-                  <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Sell Amount (B110 Sats)</label>
-                  <input
-                    type="number"
-                    value={newOfferB110}
-                    onChange={(e) => setNewOfferB110(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Buy Amount (BTC Sats)</label>
-                  <input
-                    type="number"
-                    value={newOfferBtc}
-                    onChange={(e) => setNewOfferBtc(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none"
-                  />
-                </div>
-
-                {networkMode === 'regtest' ? (
-                  <div>
-                    <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Preimage Secret (UTF-8)</label>
-                    <input
-                      type="text"
-                      value={newOfferPreimage}
-                      onChange={(e) => setNewOfferPreimage(e.target.value)}
-                      placeholder="Simulation Preimage"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none font-mono"
-                    />
-                  </div>
-                ) : (
-                  <div className="bg-slate-950 p-3 rounded-xl border border-slate-850 flex items-center gap-2 text-[10px] text-amber-400 font-semibold h-11">
-                    <Lock className="w-4 h-4" />
-                    Preimage generated securely using Web Crypto API.
-                  </div>
-                )}
-
-                <div>
-                  <button
-                    type="submit"
-                    disabled={publishing}
-                    className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm rounded-xl py-2.5 shadow-lg shadow-indigo-600/10 transition-all"
+                  <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">
+                    Select Split UTXO to back this offer
+                  </label>
+                  <select
+                    value={selectedBackingUtxoKey}
+                    onChange={(e) => {
+                      const key = e.target.value;
+                      setSelectedBackingUtxoKey(key);
+                      if (key) {
+                        const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === key);
+                        if (utxo) {
+                          const finalAmount = String(utxo.amount);
+                          setNewOfferB110(finalAmount);
+                          setNewOfferBtc(finalAmount);
+                        }
+                      } else {
+                        setNewOfferB110('');
+                        setNewOfferBtc('');
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                   >
-                    {publishing ? 'Publishing...' : 'Publish Swap Offer'}
-                  </button>
+                    <option value="">-- Choose a Split UTXO --</option>
+                    {getAvailableSplitUtxos().map(u => (
+                      <option key={`${u.txid}-${u.vout}`} value={`${u.txid}-${u.vout}`}>
+                        {u.chain === 'main' ? 'BTC' : 'BIP110'} ({(u.amount / 100000000).toFixed(4)} {u.chain === 'main' ? 'BTC' : 'B110'} | {u.txid.substring(0, 12)}...:{u.vout})
+                      </option>
+                    ))}
+                  </select>
+                  {getAvailableSplitUtxos().length === 0 && (
+                    <p className="text-xs text-rose-400 mt-2">
+                      ⚠️ You have no split UTXOs. Please go to the **Bilateral Splitter** tab to split some coins first!
+                    </p>
+                  )}
+                </div>
+
+                {selectedBackingUtxoKey && newOfferB110 && (() => {
+                  const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
+                  const isMain = utxo?.chain === 'main';
+                  return (
+                    <div className="bg-slate-950/40 border border-indigo-900/30 p-4 rounded-xl flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-1">Swap Exchange Rate (1:1 cross-chain atomic swap)</span>
+                        <span className="text-sm font-semibold text-slate-200">
+                          {isMain ? (
+                            <>
+                              Selling <span className="text-emerald-400 font-mono">{(Number(newOfferBtc) / 100000000).toFixed(4)} BTC</span> (entirety of selected BTC UTXO) ⇆ Buying <span className="text-sky-400 font-mono">{(Number(newOfferB110) / 100000000).toFixed(4)} B110</span> on BIP110-Chain
+                            </>
+                          ) : (
+                            <>
+                              Selling <span className="text-sky-400 font-mono">{(Number(newOfferB110) / 100000000).toFixed(4)} B110</span> (entirety of selected BIP110 UTXO) ⇆ Buying <span className="text-emerald-400 font-mono">{(Number(newOfferBtc) / 100000000).toFixed(4)} BTC</span> on Main-Chain
+                            </>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-end">
+                  {networkMode === 'regtest' ? (
+                    <div>
+                      <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Preimage Secret (UTF-8)</label>
+                      <input
+                        type="text"
+                        value={newOfferPreimage}
+                        onChange={(e) => setNewOfferPreimage(e.target.value)}
+                        placeholder="Simulation Preimage"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none font-mono"
+                      />
+                    </div>
+                  ) : (
+                    <div className="bg-slate-950 p-3 rounded-xl border border-slate-850 flex items-center gap-2 text-[10px] text-amber-400 font-semibold h-11">
+                      <Lock className="w-4 h-4" />
+                      Preimage generated securely using Web Crypto API.
+                    </div>
+                  )}
+
+                  <div>
+                    <button
+                      type="submit"
+                      disabled={publishing || !selectedBackingUtxoKey}
+                      className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-xl py-2.5 shadow-lg shadow-indigo-600/10 transition-all"
+                    >
+                      {publishing ? 'Publishing...' : 'Publish Swap Offer'}
+                    </button>
+                  </div>
                 </div>
               </form>
             </div>
 
-            {/* Marketplace Grid */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-              <h3 className="text-md font-semibold text-slate-200 mb-6">Marketplace Offers ({networkMode === 'mainnet' ? 'Mainnet' : 'Regtest'})</h3>
+            {/* PUBLIC MARKETPLACE LOBBY */}
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
+              <h3 className="text-md font-semibold text-slate-200 flex items-center gap-2">
+                <TrendingUp className="w-5 h-5 text-indigo-400" />
+                Public Marketplace Lobby ({networkMode === 'mainnet' ? 'Mainnet' : 'Regtest'})
+              </h3>
+              <p className="text-xs text-slate-400">
+                Accept swap offers published by other counterparties.
+              </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {offersList.length === 0 ? (
-                  <div className="col-span-2 text-center py-12 text-slate-500 border border-dashed border-slate-800 rounded-2xl">
-                    No active offers in the orderbook. Publish one above!
+                {offersList.filter(o => o.initiatorPubKey !== publicKey).length === 0 ? (
+                  <div className="col-span-2 text-center py-12 text-slate-500 border border-dashed border-slate-800 rounded-2xl bg-slate-950/20 text-xs">
+                    No other sellers' offers found in the orderbook.
                   </div>
                 ) : (
-                  offersList.map((o) => (
+                  offersList.filter(o => o.initiatorPubKey !== publicKey).map((o) => {
+                    const match = getMatchingTakerUtxo(o);
+                    const requiredChain = (!o.backingChain || o.backingChain === 'bip110') ? 'BTC' : 'BIP110';
+                    const requiredAmount = (!o.backingChain || o.backingChain === 'bip110') ? o.acceptorBtcAmount : o.initiatorB110Amount;
+                    return (
+                      <div 
+                        key={o.id} 
+                        className={`bg-slate-950 border p-5 rounded-2xl flex flex-col justify-between transition-all ${
+                          selectedOffer?.id === o.id ? 'border-indigo-500 shadow-lg shadow-indigo-500/5' : 'border-slate-850 hover:border-slate-800'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex justify-between items-start mb-4">
+                            <div>
+                              <span className="text-xs font-mono text-slate-400 block">Offer ID: #{o.id}</span>
+                              <span className="text-xs text-slate-500">Created: {new Date(o.createdAt).toLocaleTimeString()}</span>
+                            </div>
+                            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${
+                              o.isPending ? 'bg-amber-950/40 border-amber-900/60 text-amber-400 animate-pulse' :
+                              o.status === 'OPEN' ? 'bg-emerald-950/40 border-emerald-900/60 text-emerald-400' :
+                              o.status === 'ACCEPTED' ? 'bg-indigo-950/40 border-indigo-900/60 text-indigo-400' :
+                              'bg-amber-950/40 border-amber-900/60 text-amber-400'
+                            }`}>
+                              {o.isPending ? 'PENDING' : o.status}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-4 mb-4 text-xs">
+                            <div>
+                              <span className="text-slate-400 block font-medium">They Sell (You Buy)</span>
+                              <span className="font-semibold text-sky-400">
+                                {o.backingChain === 'main' ? `${(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC` : `${(o.initiatorB110Amount / 100000000).toFixed(4)} B110`}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block font-medium">They Ask (You Pay)</span>
+                              <span className="font-semibold text-emerald-400">
+                                {o.backingChain === 'main' ? `${(o.initiatorB110Amount / 100000000).toFixed(4)} B110` : `${(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC`}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
+                            <div className="flex justify-between">
+                              <span className="text-slate-500 font-medium">Required Split Balance:</span>
+                              <span className="font-semibold text-slate-300">
+                                {(requiredAmount / 100000000).toFixed(4)} {requiredChain}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-500 font-medium">Taker Status:</span>
+                              <span className={`font-semibold ${match ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {match ? '✔️ Match Ready' : `❌ Missing split ${requiredChain}`}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-5 flex gap-3">
+                          <button
+                            onClick={() => {
+                              setSelectedOffer(o);
+                              setActiveTab('wizard');
+                            }}
+                            className="flex-1 py-2 text-xs font-semibold rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 transition-all"
+                          >
+                            View Wizard
+                          </button>
+                          {o.status === 'OPEN' && (
+                            <button
+                              onClick={() => acceptOffer(o)}
+                              className="flex-1 py-2 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10"
+                            >
+                              Accept Offer
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 4: MY SWAPS & OPEN OFFERS */}
+        {activeTab === 'my-offers' && (
+          <div className="space-y-8">
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
+              <h3 className="text-md font-semibold text-slate-200 flex items-center gap-2">
+                <User className="w-5 h-5 text-indigo-400" />
+                My Swaps & Open Offers (You are Initiator)
+              </h3>
+              <p className="text-xs text-slate-400">
+                Monitor the state of swap contracts you published and if they have been taken.
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {offersList.filter(o => o.initiatorPubKey === publicKey).length === 0 ? (
+                  <div className="col-span-2 text-center py-12 text-slate-500 border border-dashed border-slate-800 rounded-2xl bg-slate-950/20 text-xs">
+                    You haven't published any swap offers yet. Go to the **Marketplace Lobby** tab to list one!
+                  </div>
+                ) : (
+                  offersList.filter(o => o.initiatorPubKey === publicKey).map((o) => (
                     <div 
                       key={o.id} 
                       className={`bg-slate-950 border p-5 rounded-2xl flex flex-col justify-between transition-all ${
@@ -1335,55 +1624,51 @@ export default function App() {
                             <span className="text-xs text-slate-500">Created: {new Date(o.createdAt).toLocaleTimeString()}</span>
                           </div>
                           <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${
-                            o.status === 'OPEN' ? 'bg-emerald-950/40 border-emerald-900/60 text-emerald-400' :
-                            o.status === 'ACCEPTED' ? 'bg-indigo-950/40 border-indigo-900/60 text-indigo-400' :
-                            'bg-amber-950/40 border-amber-900/60 text-amber-400'
+                            o.isPending ? 'bg-amber-950/40 border-amber-900/60 text-amber-400 animate-pulse' :
+                            o.status === 'OPEN' ? 'bg-slate-900 border-slate-800 text-slate-400' :
+                            o.status === 'ACCEPTED' ? 'bg-indigo-950/40 border-indigo-900/60 text-indigo-400 animate-pulse' :
+                            'bg-emerald-950/40 border-emerald-900/60 text-emerald-400'
                           }`}>
-                            {o.status}
+                            {o.isPending ? 'PENDING' : o.status === 'OPEN' ? 'OPEN (Waiting)' : o.status}
                           </span>
                         </div>
 
                         <div className="grid grid-cols-2 gap-4 mb-4 text-xs">
                           <div>
-                            <span className="text-slate-400 block">Offer (Sell)</span>
-                            <span className="font-semibold text-sky-400">{(o.initiatorB110Amount / 100000000).toFixed(4)} B110</span>
+                            <span className="text-slate-400 block font-medium">You Sell</span>
+                            <span className="font-semibold text-sky-400">
+                              {o.backingChain === 'main' ? `${(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC` : `${(o.initiatorB110Amount / 100000000).toFixed(4)} B110`}
+                            </span>
                           </div>
                           <div>
-                            <span className="text-slate-400 block">Asking (Buy)</span>
-                            <span className="font-semibold text-emerald-400">{(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC</span>
+                            <span className="text-slate-400 block font-medium">You Receive</span>
+                            <span className="font-semibold text-emerald-400">
+                              {o.backingChain === 'main' ? `${(o.initiatorB110Amount / 100000000).toFixed(4)} B110` : `${(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC`}
+                            </span>
                           </div>
                         </div>
 
                         <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
                           <div className="flex justify-between">
-                            <span className="text-slate-500">Initiator Pubkey:</span>
-                            <span className="font-mono text-slate-300 truncate w-40">{o.initiatorPubKey}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-slate-500">Hashlock (SHA256):</span>
-                            <span className="font-mono text-slate-300 truncate w-40">{o.hashLock}</span>
+                            <span className="text-slate-500 font-medium">Taker Status:</span>
+                            <span className={`font-semibold ${o.status !== 'OPEN' ? 'text-indigo-400' : 'text-slate-400'}`}>
+                              {o.status === 'OPEN' ? 'No taker yet' : '✔️ Accepted by Counterparty!'}
+                            </span>
                           </div>
                         </div>
                       </div>
 
-                      <div className="mt-5 flex gap-3">
+                      <div className="mt-5">
                         <button
                           onClick={() => {
                             setSelectedOffer(o);
                             setActiveTab('wizard');
                           }}
-                          className="flex-1 py-2 text-xs font-semibold rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-200 transition-all"
+                          className="w-full py-2.5 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10 flex items-center justify-center gap-1.5"
                         >
-                          View Wizard
+                          <Activity className="w-4 h-4" />
+                          Open Swap Wizard
                         </button>
-                        {o.status === 'OPEN' && o.initiatorPubKey !== publicKey && (
-                          <button
-                            onClick={() => acceptOffer(o.id)}
-                            className="flex-1 py-2 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10"
-                          >
-                            Accept Offer
-                          </button>
-                        )}
                       </div>
                     </div>
                   ))
@@ -1410,8 +1695,8 @@ export default function App() {
                 {/* Wizard Header Card */}
                 <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
                   <div>
-                    <span className="text-[10px] font-bold text-indigo-400 bg-indigo-950/40 border border-indigo-900/60 px-2.5 py-0.5 rounded-full uppercase tracking-wider mb-2 inline-block">
-                      Active Swap: #{selectedOffer.id} ({selectedOffer.networkMode})
+                    <span className="text-[10px] font-bold text-indigo-400 bg-indigo-950/40 border border-indigo-900/60 px-2.5 py-0.5 rounded-full uppercase tracking-wider mb-2 inline-block font-mono">
+                      Active Swap: #{selectedOffer.id} ({selectedOffer.networkMode}) {selectedOffer.isPending && <span className="text-amber-400 ml-1.5 font-bold animate-pulse">(PENDING)</span>}
                     </span>
                     <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2 mt-1">
                       Trading B110 for Bitcoin

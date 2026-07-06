@@ -80,7 +80,7 @@ async function runFullSwapTest() {
         await sleep(2000);
     } catch {}
 
-    // 3. Shared ancestry blocks 1-110
+    // 3. Shared ancestry blocks 1-110 (Activates BIP110 consensus rules on Knots from genesis)
     console.log("\n3. Mining 110 blocks of shared history...");
     const sharedMinerAddr = await mainRpc.call('getnewaddress');
     await mainRpc.call('generatetoaddress', [110, sharedMinerAddr]);
@@ -171,19 +171,7 @@ async function runFullSwapTest() {
     // Broadcast both to Main-Chain
     const initSplitTxidMain = await mainRpc.call('sendrawtransaction', [initMainSplitTx.toHex()]);
     const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [accMainSplitTx.toHex()]);
-    const blocksMined = await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
-    const block102Hash = blocksMined[0];
-
-    console.log("   - ENFORCING BIP110 CONSENSUS RULE (Banning Block 102 on Knots)...");
-    try {
-        await bip110Rpc.call('invalidateblock', [block102Hash]);
-    } catch (err: any) {
-        if (err.message.includes('Block not found')) {
-            console.log("   - Knots already natively rejected the invalid block containing OP_IF (BIP110 consensus enforced).");
-        } else {
-            throw err;
-        }
-    }
+    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
     await sleep(2000);
 
     console.log(`   - Main-Chain Block 102 Mined. Initiator Split UTXO: ${initSplitTxidMain}. Acceptor Split UTXO: ${accSplitTxidMain}`);

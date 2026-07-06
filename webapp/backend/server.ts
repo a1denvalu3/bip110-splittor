@@ -25,10 +25,12 @@ interface Offer {
     preimage?: string;             // Revealed on claim
     networkMode: 'mainnet' | 'regtest';
     createdAt: number;
+    backingTxid?: string;
+    backingVout?: number;
+    backingChain?: 'main' | 'bip110';
 }
 
 const offers: Record<string, Offer> = {};
-const splitTxids = new Set<string>(); // Tracks registered scriptpath split transaction IDs
 
 // Bitcoin RPC helper for Regtest with Auto-Healing Wallet Loader
 class BitcoinRpc {
@@ -185,18 +187,68 @@ async function initNodeWallets() {
 // STANDARD MARKETPLACE & BLOCK EXPLORER ENDPOINTS
 // ==========================================
 
+async function getTxConfirmations(txid: string | undefined, chain: 'main' | 'bip110', mode: 'mainnet' | 'regtest' = 'regtest'): Promise<number> {
+    if (!txid) return 0;
+    if (mode === 'mainnet') {
+        try {
+            const url = `https://mempool.space/api/tx/${txid}/status`;
+            const response = await axios.get(url, { timeout: 3000 });
+            return response.data.confirmed ? 1 : 0;
+        } catch {
+            return 0;
+        }
+    }
+    // Regtest
+    try {
+        const minerRpc = chain === 'bip110' ? bip110MinerRpc : mainMinerRpc;
+        const txInfo = await minerRpc.call('getrawtransaction', [txid, true]);
+        return txInfo.confirmations || 0;
+    } catch {
+        return 0;
+    }
+}
+
 // 1. Get Marketplace Offers
-app.get('/api/offers', (req: Request, res: Response) => {
+app.get('/api/offers', async (req: Request, res: Response) => {
     const mode = (req.query.networkMode || 'regtest') as 'mainnet' | 'regtest';
     const filteredOffers = Object.values(offers)
         .filter(o => o.networkMode === mode)
         .sort((a, b) => b.createdAt - a.createdAt);
-    res.json(filteredOffers);
+
+    const updatedOffers = await Promise.all(filteredOffers.map(async o => {
+        let isPending = false;
+        
+        // 1. Check if the backing split UTXO is confirmed
+        if (o.backingTxid) {
+            let confs = await getTxConfirmations(o.backingTxid, 'bip110', mode);
+            if (confs === 0) {
+                confs = await getTxConfirmations(o.backingTxid, 'main', mode);
+            }
+            if (confs < 1) {
+                isPending = true;
+            }
+        }
+        
+        // 2. Check if the active Escrow funding transactions are confirmed
+        if (!isPending) {
+            if (o.status === 'FUNDED_INITIATOR' && o.b110HtlcTxid) {
+                const confs = await getTxConfirmations(o.b110HtlcTxid, 'bip110', mode);
+                if (confs < 1) isPending = true;
+            } else if (o.status === 'FUNDED_ACCEPTOR' && o.btcHtlcTxid) {
+                const confs = await getTxConfirmations(o.btcHtlcTxid, 'main', mode);
+                if (confs < 1) isPending = true;
+            }
+        }
+        
+        return { ...o, isPending };
+    }));
+
+    res.json(updatedOffers);
 });
 
 // 2. Create a Marketplace Offer
 app.post('/api/offers', (req: Request, res: Response) => {
-    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, networkMode } = req.body;
+    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, networkMode, backingTxid, backingVout, backingChain } = req.body;
 
     if (!initiatorPubKey || !initiatorB110Amount || !acceptorBtcAmount || !hashLock || !lockTime) {
         return res.status(400).json({ error: "Missing required parameters" });
@@ -212,7 +264,10 @@ app.post('/api/offers', (req: Request, res: Response) => {
         hashLock,
         lockTime: Number(lockTime),
         networkMode: networkMode || 'regtest',
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        backingTxid,
+        backingVout: backingVout !== undefined ? Number(backingVout) : undefined,
+        backingChain
     };
 
     offers[id] = newOffer;
@@ -353,26 +408,6 @@ app.post('/api/regtest/mine', async (req: Request, res: Response) => {
         const minerAddress = await minerRpc.call('getnewaddress');
         const hashes = await minerRpc.call('generatetoaddress', [numBlocks, minerAddress]);
 
-        // If we mined blocks on the Main-chain, check if any block contains our split transaction!
-        if (chain === 'main') {
-            for (const hash of hashes) {
-                const blockInfo = await mainRootRpc.call('getblock', [hash, 1]);
-                const blockTxids = blockInfo.tx || [];
-                
-                // If any transaction in this block is a registered split transaction,
-                // we invalidate this block on Knots to simulate the consensus-level BIP110 block rejection!
-                const containsSplit = blockTxids.some((txid: string) => splitTxids.has(txid));
-                if (containsSplit) {
-                    try {
-                        await bip110MinerRpc.call('invalidateblock', [hash]);
-                        console.log(`BIP110 CONSENSUS ENFORCED: Invalidated Core block ${hash} on Knots containing OP_IF split spend.`);
-                    } catch (err: any) {
-                        console.warn("Invalidateblock warning:", err.message);
-                    }
-                }
-            }
-        }
-
         res.json({ success: true, hashes });
     } catch (err: any) {
         console.error("Mining endpoint error:", err.message);
@@ -405,12 +440,6 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 
     try {
         const txid = await minerRpc.call('sendrawtransaction', [hex]);
-        
-        // Register split transactions so we can invalidate their mined block hash on Knots
-        if (isSplit && chain === 'main') {
-            splitTxids.add(txid);
-            console.log(`Registered scriptpath split transaction: ${txid}`);
-        }
 
         res.json({ success: true, txid });
     } catch (err: any) {
