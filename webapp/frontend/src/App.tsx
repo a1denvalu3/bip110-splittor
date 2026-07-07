@@ -2175,43 +2175,118 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Role & Status Banner */}
+                {(() => {
+                  const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+                  const isBtcBacking = selectedOffer.backingChain === 'main';
+                  return (
+                    <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-md">
+                      <div>
+                        <span className="text-[10px] text-slate-500 uppercase block font-semibold tracking-wider">Your Custody Role</span>
+                        <div className="flex items-center gap-2 mt-1">
+                          <div className={`w-2.5 h-2.5 rounded-full ${isInitiator ? 'bg-indigo-500 shadow-lg shadow-indigo-500/50' : 'bg-amber-500 shadow-lg shadow-amber-500/50'}`}></div>
+                          <span className="text-md font-bold text-slate-200">
+                            {isInitiator 
+                              ? 'Initiator (Preimage Creator)' 
+                              : 'Acceptor (Preimage Taker)'}
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-400 mt-1 block">
+                          {isInitiator 
+                            ? (isBtcBacking ? 'You are Selling BTC on Main-Chain ⇆ Buying B110 on BIP110-Chain' : 'You are Selling B110 on BIP110-Chain ⇆ Buying BTC on Main-Chain')
+                            : (isBtcBacking ? 'You are Selling B110 on BIP110-Chain ⇆ Buying BTC on Main-Chain' : 'You are Selling BTC on Main-Chain ⇆ Buying B110 on BIP110-Chain')}
+                        </span>
+                      </div>
+
+                      <div className="sm:text-right">
+                        <span className="text-[10px] text-slate-500 uppercase block font-semibold tracking-wider">Current Swap Status</span>
+                        <span className="text-md font-bold text-indigo-400 block mt-1">
+                          {selectedOffer.status === 'ACCEPTED' ? 'Offer Accepted (Pending Funding)' :
+                           selectedOffer.status === 'FUNDED_INITIATOR' ? 'Initiator Escrow Funded' :
+                           selectedOffer.status === 'FUNDED_ACCEPTOR' ? 'Acceptor Escrow Funded' :
+                           selectedOffer.status === 'CLAIMED' ? 'Swap Completed Successfully' :
+                           selectedOffer.status === 'REFUNDED' ? 'Swap Aborted & Refunded' :
+                           selectedOffer.status}
+                        </span>
+                        <span className="text-[10px] text-slate-500 block mt-0.5 leading-normal max-w-xs sm:ml-auto">
+                          {selectedOffer.status === 'ACCEPTED' 
+                            ? (isInitiator ? '✔️ Please Lock & Fund the first HTLC contract.' : '⏳ Waiting for Initiator to fund the first HTLC contract...') :
+                           selectedOffer.status === 'FUNDED_INITIATOR'
+                            ? (isInitiator ? '⏳ Waiting for Acceptor to verify and fund the second HTLC contract...' : '✔️ Please verify the first HTLC and fund the second HTLC contract.') :
+                           selectedOffer.status === 'FUNDED_ACCEPTOR'
+                            ? (isInitiator ? '✔️ Please claim your coins from the second HTLC (this reveals the preimage).' : '⏳ Waiting for Initiator to claim and reveal the preimage...') :
+                           selectedOffer.status === 'CLAIMED'
+                            ? '🎉 All escrow claims have been settled. Swap complete!' :
+                           selectedOffer.status === 'REFUNDED'
+                            ? '⚠️ The timelock expired and funds were reclaimed.' :
+                           ''}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* State Machine Step Tracker */}
                 <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-                  {[
-                    { step: 1, title: 'Bilateral Split', desc: 'Secure inputs from replay risk', activeStatus: ['OPEN', 'ACCEPTED'] },
-                    { step: 2, title: 'B110 Locked', desc: 'Initiator funds B110 HTLC', activeStatus: ['ACCEPTED'] },
-                    { step: 3, title: 'BTC Locked', desc: 'Acceptor funds BTC HTLC', activeStatus: ['FUNDED_INITIATOR'] },
-                    { step: 4, title: 'Claim BTC', desc: 'Initiator claims with preimage', activeStatus: ['FUNDED_ACCEPTOR'] },
-                    { step: 5, title: 'Claim B110', desc: 'Acceptor extracts & claims', activeStatus: ['CLAIMED'] }
-                  ].map(s => {
-                    const isPassed = 
-                      (s.step === 1 && selectedOffer.status !== 'OPEN') ||
-                      (s.step === 2 && ['FUNDED_INITIATOR', 'FUNDED_ACCEPTOR', 'CLAIMED'].includes(selectedOffer.status)) ||
-                      (s.step === 3 && ['FUNDED_ACCEPTOR', 'CLAIMED'].includes(selectedOffer.status)) ||
-                      (s.step === 4 && selectedOffer.status === 'CLAIMED' && selectedOffer.preimage) ||
-                      (s.step === 5 && selectedOffer.status === 'CLAIMED' && !selectedOffer.preimage);
+                  {(() => {
+                    const isBtcBacking = selectedOffer.backingChain === 'main';
+                    const steps = [
+                      { step: 1, title: 'Bilateral Split', desc: 'Secure inputs from replay risk', activeStatus: ['OPEN', 'ACCEPTED'] },
+                      { 
+                        step: 2, 
+                        title: isBtcBacking ? 'BTC Locked' : 'B110 Locked', 
+                        desc: isBtcBacking ? 'Initiator funds BTC HTLC' : 'Initiator funds B110 HTLC', 
+                        activeStatus: ['ACCEPTED'] 
+                      },
+                      { 
+                        step: 3, 
+                        title: isBtcBacking ? 'B110 Locked' : 'BTC Locked', 
+                        desc: isBtcBacking ? 'Acceptor funds B110 HTLC' : 'Acceptor funds BTC HTLC', 
+                        activeStatus: ['FUNDED_INITIATOR'] 
+                      },
+                      { 
+                        step: 4, 
+                        title: isBtcBacking ? 'Claim B110' : 'Claim BTC', 
+                        desc: isBtcBacking ? 'Initiator claims with preimage' : 'Initiator claims with preimage', 
+                        activeStatus: ['FUNDED_ACCEPTOR'] 
+                      },
+                      { 
+                        step: 5, 
+                        title: isBtcBacking ? 'Claim BTC' : 'Claim B110', 
+                        desc: isBtcBacking ? 'Acceptor extracts & claims' : 'Acceptor extracts & claims', 
+                        activeStatus: ['CLAIMED'] 
+                      }
+                    ];
+                    return steps.map(s => {
+                      const isPassed = 
+                        (s.step === 1 && selectedOffer.status !== 'OPEN') ||
+                        (s.step === 2 && ['FUNDED_INITIATOR', 'FUNDED_ACCEPTOR', 'CLAIMED'].includes(selectedOffer.status)) ||
+                        (s.step === 3 && ['FUNDED_ACCEPTOR', 'CLAIMED'].includes(selectedOffer.status)) ||
+                        (s.step === 4 && selectedOffer.status === 'CLAIMED' && selectedOffer.preimage) ||
+                        (s.step === 5 && selectedOffer.status === 'CLAIMED' && !selectedOffer.preimage);
 
-                    const isActive = s.activeStatus.includes(selectedOffer.status);
+                      const isActive = s.activeStatus.includes(selectedOffer.status);
 
-                    return (
-                      <div 
-                        key={s.step} 
-                        className={`border p-4 rounded-2xl transition-all ${
-                          isActive 
-                            ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-500/5' 
-                            : isPassed 
-                            ? 'bg-slate-900/20 border-slate-800 opacity-60' 
-                            : 'bg-slate-950 border-slate-900 opacity-30'
-                        }`}
-                      >
-                        <span className={`text-xs font-bold block mb-1.5 ${isActive ? 'text-indigo-400' : isPassed ? 'text-emerald-400' : 'text-slate-500'}`}>
-                          Step {s.step}
-                        </span>
-                        <h4 className="text-xs font-bold text-slate-200 mb-1">{s.title}</h4>
-                        <p className="text-[10px] text-slate-400 leading-normal">{s.desc}</p>
-                      </div>
-                    )
-                  })}
+                      return (
+                        <div 
+                          key={s.step} 
+                          className={`border p-4 rounded-2xl transition-all ${
+                            isActive 
+                              ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-500/5' 
+                              : isPassed 
+                              ? 'bg-slate-900/20 border-slate-800 opacity-60' 
+                              : 'bg-slate-950 border-slate-900 opacity-30'
+                          }`}
+                        >
+                          <span className={`text-xs font-bold block mb-1.5 ${isActive ? 'text-indigo-400' : isPassed ? 'text-emerald-400' : 'text-slate-500'}`}>
+                            Step {s.step}
+                          </span>
+                          <h4 className="text-xs font-bold text-slate-200 mb-1">{s.title}</h4>
+                          <p className="text-[10px] text-slate-400 leading-normal">{s.desc}</p>
+                        </div>
+                      );
+                    });
+                  })()}
                 </div>
 
                 {/* Interactive Steps Action Board */}
@@ -2246,97 +2321,159 @@ export default function App() {
                     {selectedOffer.status === 'ACCEPTED' && (() => {
                       const isBtcBacking = selectedOffer.backingChain === 'main';
                       const utxo = getActiveStepUtxo(2);
+                      const isInitiator = selectedOffer.initiatorPubKey === publicKey;
                       const bgClass = isBtcBacking ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-sky-600 hover:bg-sky-500';
-                      return (
-                        <div className="bg-slate-950 border border-slate-850 p-5 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                          <div>
-                            <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Initiator)</span>
-                            <h4 className="text-xs font-bold text-slate-200">Lock {isBtcBacking ? 'Bitcoin' : 'BIP110'} Coins into HTLC Contract</h4>
-                            {utxo && (
-                              <p className="text-[10px] text-slate-400 font-mono mt-2 bg-slate-900 border border-slate-850 p-2.5 rounded-lg leading-normal">
-                                <span className="block font-semibold text-slate-300 mb-1">Spending Split UTXO:</span>
-                                TxID: {utxo.txid.substring(0, 12)}...{utxo.txid.substring(52)}:{utxo.vout}<br />
-                                Amount: {(utxo.amount / 100000000).toFixed(4)} {isBtcBacking ? 'BTC' : 'B110'}<br />
-                                Address: {utxo.address || 'Split contract / ownAddress'}
-                              </p>
-                            )}
+
+                      if (isInitiator) {
+                        return (
+                          <div className="bg-slate-950 border border-slate-850 p-5 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                            <div>
+                              <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Initiator)</span>
+                              <h4 className="text-xs font-bold text-slate-200">Lock {isBtcBacking ? 'Bitcoin' : 'BIP110'} Coins into HTLC Contract</h4>
+                              {utxo && (
+                                <p className="text-[10px] text-slate-400 font-mono mt-2 bg-slate-900 border border-slate-850 p-2.5 rounded-lg leading-normal">
+                                  <span className="block font-semibold text-slate-300 mb-1">Spending Split UTXO:</span>
+                                  TxID: {utxo.txid.substring(0, 12)}...{utxo.txid.substring(52)}:{utxo.vout}<br />
+                                  Amount: {(utxo.amount / 100000000).toFixed(4)} {isBtcBacking ? 'BTC' : 'B110'}<br />
+                                  Address: {utxo.address || 'Split contract / ownAddress'}
+                                </p>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => runWizardStep(2)}
+                              className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center ${bgClass}`}
+                            >
+                              Lock & Fund {isBtcBacking ? 'BTC' : 'B110'} HTLC
+                            </button>
                           </div>
-                          <button
-                            onClick={() => runWizardStep(2)}
-                            className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center ${bgClass}`}
-                          >
-                            Lock & Fund {isBtcBacking ? 'BTC' : 'B110'} HTLC
-                          </button>
-                        </div>
-                      );
+                        );
+                      } else {
+                        return (
+                          <div className="bg-slate-950 border border-slate-900 p-6 rounded-xl flex items-center gap-4 text-slate-400">
+                            <div className="w-6 h-6 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin flex items-center justify-center"></div>
+                            <div>
+                              <h4 className="text-xs font-bold text-slate-200">Waiting for Initiator to fund the first HTLC contract</h4>
+                              <p className="text-[10px] text-slate-500 mt-0.5 leading-normal">
+                                The Initiator is currently locking their split coins into the {isBtcBacking ? 'BTC' : 'BIP110'} HTLC contract. Once broadcasted, this dashboard will update automatically.
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      }
                     })()}
 
                     {/* Step 3: Lock BTC / B110 */}
                     {selectedOffer.status === 'FUNDED_INITIATOR' && (() => {
                       const isBtcBacking = selectedOffer.backingChain === 'main';
                       const utxo = getActiveStepUtxo(3);
+                      const isInitiator = selectedOffer.initiatorPubKey === publicKey;
                       const bgClass = isBtcBacking ? 'bg-sky-600 hover:bg-sky-500' : 'bg-emerald-600 hover:bg-emerald-500';
-                      return (
-                        <div className="bg-slate-950 border border-slate-850 p-5 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                          <div>
-                            <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Acceptor)</span>
-                            <h4 className="text-xs font-bold text-slate-200">Lock {isBtcBacking ? 'BIP110' : 'Bitcoin'} Coins into HTLC Contract</h4>
-                            {utxo && (
-                              <p className="text-[10px] text-slate-400 font-mono mt-2 bg-slate-900 border border-slate-850 p-2.5 rounded-lg leading-normal">
-                                <span className="block font-semibold text-slate-300 mb-1">Spending Split UTXO:</span>
-                                TxID: {utxo.txid.substring(0, 12)}...{utxo.txid.substring(52)}:{utxo.vout}<br />
-                                Amount: {(utxo.amount / 100000000).toFixed(4)} {isBtcBacking ? 'B110' : 'BTC'}<br />
-                                Address: {utxo.address || 'Split contract / ownAddress'}
-                              </p>
-                            )}
+
+                      if (!isInitiator) {
+                        return (
+                          <div className="bg-slate-950 border border-slate-850 p-5 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                            <div>
+                              <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Acceptor)</span>
+                              <h4 className="text-xs font-bold text-slate-200">Lock {isBtcBacking ? 'BIP110' : 'Bitcoin'} Coins into HTLC Contract</h4>
+                              {utxo && (
+                                <p className="text-[10px] text-slate-400 font-mono mt-2 bg-slate-900 border border-slate-850 p-2.5 rounded-lg leading-normal">
+                                  <span className="block font-semibold text-slate-300 mb-1">Spending Split UTXO:</span>
+                                  TxID: {utxo.txid.substring(0, 12)}...{utxo.txid.substring(52)}:{utxo.vout}<br />
+                                  Amount: {(utxo.amount / 100000000).toFixed(4)} {isBtcBacking ? 'B110' : 'BTC'}<br />
+                                  Address: {utxo.address || 'Split contract / ownAddress'}
+                                </p>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => runWizardStep(3)}
+                              className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center ${bgClass}`}
+                            >
+                              Lock & Fund {isBtcBacking ? 'B110' : 'BTC'} HTLC
+                            </button>
                           </div>
-                          <button
-                            onClick={() => runWizardStep(3)}
-                            className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center ${bgClass}`}
-                          >
-                            Lock & Fund {isBtcBacking ? 'B110' : 'BTC'} HTLC
-                          </button>
-                        </div>
-                      );
+                        );
+                      } else {
+                        return (
+                          <div className="bg-slate-950 border border-slate-900 p-5 rounded-xl flex items-center justify-between opacity-80">
+                            <div>
+                              <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Awaiting Action (Counterparty)</span>
+                              <h4 className="text-xs font-bold text-slate-300">Waiting for Acceptor to Lock {isBtcBacking ? 'BIP110' : 'Bitcoin'} Coins</h4>
+                              <p className="text-[10px] text-slate-500 mt-1">
+                                You have successfully funded the first HTLC. Once the Acceptor verifies and locks their coins, we will proceed to Step 4.
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      }
                     })()}
 
                     {/* Step 4: Claim BTC / B110 */}
                     {selectedOffer.status === 'FUNDED_ACCEPTOR' && (() => {
                       const isBtcBacking = selectedOffer.backingChain === 'main';
-                      return (
-                        <div className="bg-slate-950 border border-slate-850 p-4 rounded-xl flex justify-between items-center">
-                          <div>
-                            <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Initiator)</span>
-                            <h4 className="text-xs font-bold text-slate-200">Initiator Claims {isBtcBacking ? 'B110' : 'BTC'} (Revealing Preimage)</h4>
+                      const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+
+                      if (isInitiator) {
+                        return (
+                          <div className="bg-slate-950 border border-slate-850 p-4 rounded-xl flex justify-between items-center">
+                            <div>
+                              <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Initiator)</span>
+                              <h4 className="text-xs font-bold text-slate-200">Initiator Claims {isBtcBacking ? 'B110' : 'BTC'} (Revealing Preimage)</h4>
+                            </div>
+                            <button
+                              onClick={() => runWizardStep(4)}
+                              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
+                            >
+                              Claim {isBtcBacking ? 'B110' : 'BTC'} (Reveal Secret)
+                            </button>
                           </div>
-                          <button
-                            onClick={() => runWizardStep(4)}
-                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
-                          >
-                            Claim {isBtcBacking ? 'B110' : 'BTC'} (Reveal Secret)
-                          </button>
-                        </div>
-                      );
+                        );
+                      } else {
+                        return (
+                          <div className="bg-slate-950 border border-slate-900 p-6 rounded-xl flex items-center gap-4 text-slate-400">
+                            <div className="w-6 h-6 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin flex items-center justify-center"></div>
+                            <div>
+                              <h4 className="text-xs font-bold text-slate-200">Waiting for Initiator to claim and reveal preimage</h4>
+                              <p className="text-[10px] text-slate-500 mt-0.5 leading-normal">
+                                Both contracts are now fully funded on both blockchains. The Initiator is currently claiming their {isBtcBacking ? 'B110' : 'BTC'} coins, which will write the preimage secret to the public ledger.
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      }
                     })()}
 
                     {/* Step 5: Claim B110 / BTC */}
                     {selectedOffer.status === 'CLAIMED' && selectedOffer.preimage && (() => {
                       const isBtcBacking = selectedOffer.backingChain === 'main';
-                      return (
-                        <div className="bg-slate-950 border border-slate-850 p-4 rounded-xl flex justify-between items-center">
-                          <div>
-                            <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Acceptor)</span>
-                            <h4 className="text-xs font-bold text-slate-200">Acceptor Claims {isBtcBacking ? 'BTC' : 'B110'} using revealed Preimage</h4>
-                            <p className="text-[10px] text-amber-400 font-mono mt-1 font-semibold">Found Preimage: "{selectedOffer.preimage}"</p>
+                      const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+
+                      if (!isInitiator) {
+                        return (
+                          <div className="bg-slate-950 border border-slate-850 p-4 rounded-xl flex justify-between items-center">
+                            <div>
+                              <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Acceptor)</span>
+                              <h4 className="text-xs font-bold text-slate-200">Acceptor Claims {isBtcBacking ? 'BTC' : 'B110'} using revealed Preimage</h4>
+                              <p className="text-[10px] text-amber-400 font-mono mt-1 font-semibold">Found Preimage: "{selectedOffer.preimage}"</p>
+                            </div>
+                            <button
+                              onClick={() => runWizardStep(5)}
+                              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
+                            >
+                              Claim {isBtcBacking ? 'BTC' : 'B110'} (Extract Secret)
+                            </button>
                           </div>
-                          <button
-                            onClick={() => runWizardStep(5)}
-                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
-                          >
-                            Claim {isBtcBacking ? 'BTC' : 'B110'} (Extract Secret)
-                          </button>
-                        </div>
-                      );
+                        );
+                      } else {
+                        return (
+                          <div className="bg-emerald-950/20 border border-emerald-900/40 p-5 rounded-xl text-center">
+                            <CheckCircle className="w-8 h-8 text-emerald-400 mx-auto mb-2 animate-pulse" />
+                            <h4 className="text-sm font-bold text-emerald-200">You claimed your coins!</h4>
+                            <p className="text-[10px] text-slate-400 leading-normal">
+                              You have successfully claimed your {isBtcBacking ? 'B110' : 'BTC'} coins and revealed the preimage secret. The Acceptor is now claiming their {isBtcBacking ? 'BTC' : 'B110'} coins.
+                            </p>
+                          </div>
+                        );
+                      }
                     })()}
 
                     {/* Swap Completed / Final State */}
