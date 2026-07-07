@@ -105,4 +105,78 @@ describe('Pure Bitcoinjs-Lib Optimized Swap Tests', () => {
         expect(htlcPayment1.address).to.equal(htlcPayment2.address);
         expect(htlcPayment1.address!.startsWith('tb1p')).to.be.true;
     });
+
+    it('5. Taproot HTLC Verification Primitives should correctly validate matching and mismatching parameters', () => {
+        const mockInternalPubKey = Buffer.from(
+            '0250863ad64a87ae8a2fe83c1af1a8403cb53f53e486d8511dad8a04887e5b2352', 
+            'hex'
+        );
+
+        const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
+            mockInternalPubKey,
+            hashLock,
+            acceptorPubKey,
+            initiatorPubKey,
+            lockTime
+        );
+
+        const address = htlcPayment.address!;
+        const output = htlcPayment.output!;
+
+        // 1. Check with correct parameters
+        const isAddressValid = PureBitcoinSwap.verifyTaprootHtlcAddress(
+            address,
+            mockInternalPubKey,
+            hashLock,
+            acceptorPubKey,
+            initiatorPubKey,
+            lockTime
+        );
+        expect(isAddressValid).to.be.true;
+
+        const isOutputValid = PureBitcoinSwap.verifyTaprootHtlcOutput(
+            Buffer.from(output),
+            mockInternalPubKey,
+            hashLock,
+            acceptorPubKey,
+            initiatorPubKey,
+            lockTime
+        );
+        expect(isOutputValid).to.be.true;
+
+        // 2. Check with wrong internal public key
+        const wrongInternalKey = Buffer.from(PureBitcoinSwap.generateKeyPair().publicKey);
+        const badAddressCheck1 = PureBitcoinSwap.verifyTaprootHtlcAddress(
+            address,
+            wrongInternalKey,
+            hashLock,
+            acceptorPubKey,
+            initiatorPubKey,
+            lockTime
+        );
+        expect(badAddressCheck1).to.be.false;
+
+        // 3. Check with wrong recipient pubkey
+        const wrongRecipient = Buffer.from(PureBitcoinSwap.generateKeyPair().publicKey);
+        const badAddressCheck2 = PureBitcoinSwap.verifyTaprootHtlcAddress(
+            address,
+            mockInternalPubKey,
+            hashLock,
+            wrongRecipient,
+            initiatorPubKey,
+            lockTime
+        );
+        expect(badAddressCheck2).to.be.false;
+
+        // 4. Check with wrong lockTime
+        const badAddressCheck3 = PureBitcoinSwap.verifyTaprootHtlcAddress(
+            address,
+            mockInternalPubKey,
+            hashLock,
+            acceptorPubKey,
+            initiatorPubKey,
+            lockTime + 1
+        );
+        expect(badAddressCheck3).to.be.false;
+    });
 });

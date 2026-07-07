@@ -381,4 +381,59 @@ export class PureBitcoinSwap {
 
         return tx;
     }
+
+    /**
+     * Verifies that a given Taproot HTLC address matches the expected script leaves and parameters.
+     */
+    static verifyTaprootHtlcAddress(
+        addressToVerify: string,
+        internalPubKey: Buffer,
+        hashLock: Buffer,
+        recipientPubKey: Buffer,
+        refundPubKey: Buffer,
+        lockTime: number,
+        network: bitcoin.Network = bitcoin.networks.testnet
+    ): boolean {
+        try {
+            const expectedHtlc = this.createTaprootHtlc(
+                internalPubKey,
+                hashLock,
+                recipientPubKey,
+                refundPubKey,
+                lockTime,
+                network
+            );
+            return expectedHtlc.address === addressToVerify;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Verifies that a given output scriptPubkey matches the expected script leaves and parameters.
+     */
+    static verifyTaprootHtlcOutput(
+        outputToVerify: Buffer,
+        internalPubKey: Buffer,
+        hashLock: Buffer,
+        recipientPubKey: Buffer,
+        refundPubKey: Buffer,
+        lockTime: number,
+        network: bitcoin.Network = bitcoin.networks.testnet
+    ): boolean {
+        try {
+            const expectedHtlc = this.createTaprootHtlc(
+                internalPubKey,
+                hashLock,
+                recipientPubKey,
+                refundPubKey,
+                lockTime,
+                network
+            );
+            if (!expectedHtlc.output || !outputToVerify) return false;
+            return Buffer.from(expectedHtlc.output).equals(Buffer.from(outputToVerify));
+        } catch {
+            return false;
+        }
+    }
 }
