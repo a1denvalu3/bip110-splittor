@@ -135,9 +135,10 @@ export default function App() {
 
   // Helper to get total BIP110 split balance
   const getBip110SplitBalance = (): number => {
-    return bip110Utxos
+    const splitContractB110 = bip110Utxos
       .filter(u => isBip110UtxoSplit(u))
       .reduce((sum, u) => sum + u.amount, 0);
+    return splitContractB110 + ownBip110Balance;
   };
 
   // Helper to get total BIP110 unsplit balance
@@ -1393,7 +1394,7 @@ export default function App() {
                   <div className="flex-1 border-l border-slate-800 pl-4">
                     <span className="text-xs text-slate-400 block mb-1">BIP110 Balance</span>
                     <span className="text-xl font-bold text-sky-400">
-                      {(bip110Balance / 100000000).toFixed(4)} B110
+                      {((bip110Balance + ownBip110Balance) / 100000000).toFixed(4)} B110
                     </span>
                     <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
                       {(getBip110UnsplitBalance() / 100000000).toFixed(4)} Unsplit + {(getBip110SplitBalance() / 100000000).toFixed(4)} Split
