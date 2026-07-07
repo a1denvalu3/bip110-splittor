@@ -247,13 +247,22 @@ export class PureBitcoinSwap {
         tx.version = 2;
         tx.addInput(Buffer.from(splitTxid, 'hex').reverse(), outputIndex);
         
+        // Ensure there is always a fee of at least 5000 satoshis paid to the network
+        const fee = BigInt(5000);
+        let finalOutputSats = outputSats;
+        let changeSats = inputSats - finalOutputSats - fee;
+
+        if (changeSats < 0n) {
+            // No change output can be created, so we must reduce the HTLC funding output amount
+            // to pay the minimum transaction fee from the input!
+            finalOutputSats = inputSats - fee;
+            changeSats = 0n;
+        }
+
         // 1. Add HTLC contract output
-        tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), outputSats);
+        tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), finalOutputSats);
 
         // 2. Add change output if there's leftover change and a change address is provided
-        const fee = BigInt(5000); // 5000 sats is plenty for standard Taproot txs
-        const changeSats = inputSats - outputSats - fee;
-
         if (changeSats > 0n && changeAddr) {
             tx.addOutput(bitcoin.address.toOutputScript(changeAddr, network), changeSats);
         }
