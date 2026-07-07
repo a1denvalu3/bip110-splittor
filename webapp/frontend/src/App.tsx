@@ -274,6 +274,166 @@ export default function App() {
     }
   };
 
+  const executeRefund = async () => {
+    if (!selectedOffer) return;
+    const net = getNetwork();
+    const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+    const isBtcBacking = selectedOffer.backingChain === 'main';
+
+    try {
+      if (isInitiator) {
+        // Initiator refunds the first HTLC after lockTime (T)
+        const targetChain = isBtcBacking ? 'main' : 'bip110';
+        const targetAddress = isBtcBacking ? selectedOffer.btcHtlcAddress! : selectedOffer.b110HtlcAddress!;
+        const currentHeight = isBtcBacking ? nodeInfo.mainHeight : nodeInfo.bip110Height;
+
+        if (currentHeight < selectedOffer.lockTime) {
+          throw new Error(`Cannot refund yet: current block height is ${currentHeight}, but refund locktime is ${selectedOffer.lockTime}. Please mine more blocks first.`);
+        }
+
+        showToast(`Locating funded UTXO on ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC address...`, 'info');
+
+        const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
+          address: targetAddress,
+          chain: targetChain,
+          networkMode
+        });
+        const utxo = htlcUtxosRes.data.utxos[0];
+        if (!utxo) throw new Error("No funded UTXO found on your HTLC contract. Has it already been claimed or refunded?");
+
+        showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
+
+        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+        
+        // Reconstruct the HTLC payment details
+        const recipientPubKey = isBtcBacking 
+          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
+          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const refundPubKey = isBtcBacking 
+          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
+          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+
+        const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
+          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          Buffer.from(selectedOffer.hashLock, 'hex'),
+          recipientPubKey,
+          refundPubKey,
+          selectedOffer.lockTime,
+          net
+        );
+
+        // Build and sign refund transaction
+        const tx = PureBitcoinSwap.buildHtlcRefundTx(
+          keyPair,
+          utxo.txid,
+          utxo.vout,
+          BigInt(utxo.amount),
+          BigInt(utxo.amount - 2000), // Standard fee deduction
+          ownAddress, // Refund goes back to user's safe ownAddress
+          Buffer.from(selectedOffer.hashLock, 'hex'),
+          recipientPubKey,
+          htlcPayment,
+          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          selectedOffer.lockTime,
+          net
+        );
+
+        // Broadcast raw tx
+        await axios.post(`${API_BASE}/tx/broadcast`, {
+          hex: tx.toHex(),
+          chain: targetChain,
+          networkMode
+        });
+
+        // Update Offer State on server
+        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
+          status: 'REFUNDED'
+        });
+
+        setSelectedOffer(updateRes.data);
+        showToast("HTLC successfully refunded! Your coins have been reclaimed.", "success");
+      } 
+      
+      else {
+        // Acceptor refunds the second HTLC after lockTime / 2 (T/2)
+        const targetChain = isBtcBacking ? 'bip110' : 'main';
+        const targetAddress = isBtcBacking ? selectedOffer.b110HtlcAddress! : selectedOffer.btcHtlcAddress!;
+        const currentHeight = isBtcBacking ? nodeInfo.bip110Height : nodeInfo.mainHeight;
+        const requiredLockTime = Math.round(selectedOffer.lockTime / 2);
+
+        if (currentHeight < requiredLockTime) {
+          throw new Error(`Cannot refund yet: current block height is ${currentHeight}, but refund locktime is ${requiredLockTime}. Please mine more blocks first.`);
+        }
+
+        showToast(`Locating funded UTXO on ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC address...`, 'info');
+
+        const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
+          address: targetAddress,
+          chain: targetChain,
+          networkMode
+        });
+        const utxo = htlcUtxosRes.data.utxos[0];
+        if (!utxo) throw new Error("No funded UTXO found on your HTLC contract. Has it already been claimed or refunded?");
+
+        showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
+
+        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+        
+        // Reconstruct second HTLC payment details
+        const secondHtlcRecipient = isBtcBacking 
+          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
+          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const secondHtlcRefund = isBtcBacking 
+          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
+          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+
+        const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
+          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          Buffer.from(selectedOffer.hashLock, 'hex'),
+          secondHtlcRecipient,
+          secondHtlcRefund,
+          selectedOffer.lockTime,
+          net
+        );
+
+        // Build and sign refund transaction
+        const tx = PureBitcoinSwap.buildHtlcRefundTx(
+          keyPair,
+          utxo.txid,
+          utxo.vout,
+          BigInt(utxo.amount),
+          BigInt(utxo.amount - 2000), // Standard fee deduction
+          ownAddress, // Refund goes back to user's safe ownAddress
+          Buffer.from(selectedOffer.hashLock, 'hex'),
+          secondHtlcRecipient,
+          htlcPayment,
+          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          selectedOffer.lockTime,
+          net
+        );
+
+        // Broadcast raw tx
+        await axios.post(`${API_BASE}/tx/broadcast`, {
+          hex: tx.toHex(),
+          chain: targetChain,
+          networkMode
+        });
+
+        // Update Offer State on server
+        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
+          status: 'REFUNDED'
+        });
+
+        setSelectedOffer(updateRes.data);
+        showToast("HTLC successfully refunded! Your coins have been reclaimed.", "success");
+      }
+
+      await fetchBalances();
+    } catch (err: any) {
+      showToast(`Refund failed: ${err.message}`, "error");
+    }
+  };
+
   // Load saved keys from LocalStorage on mount or networkMode change
   useEffect(() => {
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
@@ -861,6 +1021,12 @@ export default function App() {
         });
         const utxo = htlcUtxosRes.data.utxos[0];
         if (!utxo) throw new Error(`Could not find the funded UTXO on the ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC. If on regtest, mine a block.`);
+
+        // Verification of the amount funded inside the HTLC
+        const requiredAmount = isBtcBacking ? selectedOffer.initiatorB110Amount : selectedOffer.acceptorBtcAmount;
+        if (BigInt(utxo.amount) < BigInt(requiredAmount - 5000)) {
+          throw new Error(`CRITICAL SECURITY WARNING: The acceptor funded the HTLC with only ${(utxo.amount / 100000000).toFixed(4)} ${targetChain === 'main' ? 'BTC' : 'B110'}, but the agreed amount was ${(requiredAmount / 100000000).toFixed(4)}! Do NOT release the preimage!`);
+        }
 
         // Retrieve local preimage securely stored
         const savedPreimage = localStorage.getItem(`preimage_${selectedOffer.id}`);
@@ -2179,6 +2345,77 @@ export default function App() {
                         <CheckCircle className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
                         <h4 className="text-sm font-bold text-emerald-200">Swap Execution Completed!</h4>
                         <p className="text-[10px] text-slate-400">All coins have successfully switched owners on both blockchains using replay-protected Taproot MAST leaves.</p>
+                      </div>
+                    )}
+
+                    {/* Safety Refund Panel */}
+                    {(selectedOffer.status === 'FUNDED_INITIATOR' || selectedOffer.status === 'FUNDED_ACCEPTOR') && (() => {
+                      const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+                      const isBtcBacking = selectedOffer.backingChain === 'main';
+
+                      const targetLocktime = isInitiator 
+                        ? selectedOffer.lockTime 
+                        : Math.round(selectedOffer.lockTime / 2);
+
+                      const targetChain = isInitiator
+                        ? (isBtcBacking ? 'main' : 'bip110')
+                        : (isBtcBacking ? 'bip110' : 'main');
+
+                      const currentHeight = targetChain === 'main' 
+                        ? nodeInfo.mainHeight 
+                        : nodeInfo.bip110Height;
+
+                      const isExpired = currentHeight >= targetLocktime;
+
+                      return (
+                        <div className="bg-slate-900/30 border border-slate-800 p-5 rounded-xl space-y-3 mt-4">
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <h4 className="text-xs font-bold text-slate-300">Safety Refund Contract Gating</h4>
+                              <p className="text-[10px] text-slate-400 mt-0.5 leading-normal">
+                                If the counterparty disappears or fails to fulfill their step, you can safely reclaim your locked funds from the HTLC after block height expiration.
+                              </p>
+                            </div>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${isExpired ? 'bg-amber-950/40 border-amber-900/60 text-amber-400 animate-pulse' : 'bg-slate-950 border-slate-900 text-slate-500'}`}>
+                              {isExpired ? 'EXPIRED (REFUND READY)' : 'LOCKED'}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-4 text-[10px] font-mono bg-slate-950 border border-slate-900 p-3 rounded-lg leading-normal">
+                            <div>
+                              <span className="text-slate-500 block">Your HTLC Locktime:</span>
+                              <span className="font-semibold text-slate-300">Block #{targetLocktime}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 block">Current Height ({targetChain === 'main' ? 'BTC' : 'B110'}):</span>
+                              <span className={`font-semibold ${isExpired ? 'text-amber-400 font-bold' : 'text-slate-400'}`}>Block #{currentHeight}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex justify-between items-center pt-1.5 gap-4">
+                            <span className="text-[10px] text-slate-500 font-medium leading-normal">
+                              {isExpired 
+                                ? '✔️ Refund window is OPEN. Reclaim your funds now.' 
+                                : `⏳ Refund opens in ${targetLocktime - currentHeight} blocks (~${(((targetLocktime - currentHeight) * 10) / 60).toFixed(1)} hrs).`}
+                            </span>
+                            <button
+                              onClick={executeRefund}
+                              disabled={!isExpired}
+                              className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-md transition-all whitespace-nowrap"
+                            >
+                              Reclaim Locked Funds
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Swap Refunded / Failed State */}
+                    {selectedOffer.status === 'REFUNDED' && (
+                      <div className="bg-amber-950/20 border border-amber-900/60 p-5 rounded-xl text-center">
+                        <AlertTriangle className="w-8 h-8 text-amber-500 mx-auto mb-2 animate-bounce" />
+                        <h4 className="text-sm font-bold text-amber-200">Swap Execution Refunded!</h4>
+                        <p className="text-[10px] text-slate-400">The timelock expired and locked funds have been successfully recovered back to the owner's safe wallet address.</p>
                       </div>
                     )}
                   </div>
