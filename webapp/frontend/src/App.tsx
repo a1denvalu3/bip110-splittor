@@ -113,6 +113,8 @@ export default function App() {
   const [newOfferBtc, setNewOfferBtc] = useState<string>('50000000'); // 0.5 BTC
   const [newOfferPreimage, setNewOfferPreimage] = useState<string>('secret-swap-preimage-proof');
   const [newOfferLocktime, setNewOfferLocktime] = useState<string>('2000');
+  const [sellAmountSats, setSellAmountSats] = useState<string>('');
+  const [premiumPercent, setPremiumPercent] = useState<string>('0');
   const [publishing, setPublishing] = useState<boolean>(false);
   const [selectedBackingUtxoKey, setSelectedBackingUtxoKey] = useState<string>('');
 
@@ -236,6 +238,40 @@ export default function App() {
     }
 
     return null;
+  };
+
+  const handleSellAmountChange = (valStr: string) => {
+    setSellAmountSats(valStr);
+    const amountVal = Number(valStr) || 0;
+    const premium = Number(premiumPercent) || 0;
+    const calculatedBuy = String(Math.round(amountVal * (1 + premium / 100)));
+    
+    const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
+    if (utxo) {
+      if (utxo.chain === 'main') {
+        setNewOfferBtc(valStr); // Selling BTC
+        setNewOfferB110(calculatedBuy); // Buying B110
+      } else {
+        setNewOfferB110(valStr); // Selling B110
+        setNewOfferBtc(calculatedBuy); // Buying BTC
+      }
+    }
+  };
+
+  const handlePremiumChange = (valStr: string) => {
+    setPremiumPercent(valStr);
+    const premium = Number(valStr) || 0;
+    const amountVal = Number(sellAmountSats) || 0;
+    const calculatedBuy = String(Math.round(amountVal * (1 + premium / 100)));
+
+    const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
+    if (utxo) {
+      if (utxo.chain === 'main') {
+        setNewOfferB110(calculatedBuy); // Buying B110
+      } else {
+        setNewOfferBtc(calculatedBuy); // Buying BTC
+      }
+    }
   };
 
   // Load saved keys from LocalStorage on mount or networkMode change
@@ -475,6 +511,19 @@ export default function App() {
       
       const utxo = getAvailableSplitUtxos().find(u => u.txid === backingTxid && u.vout === backingVout);
       const backingChain = utxo?.chain;
+
+      if (!utxo) {
+        throw new Error("Please select a split UTXO to back this offer.");
+      }
+
+      const sellAmount = Number(sellAmountSats);
+      if (!sellAmount || sellAmount <= 0) {
+        throw new Error("Please enter a valid sell amount.");
+      }
+
+      if (sellAmount > utxo.amount) {
+        throw new Error(`Sell amount cannot exceed the selected UTXO size of ${(utxo.amount / 100000000).toFixed(4)}.`);
+      }
 
       let preimageHex = '';
 
@@ -1579,10 +1628,14 @@ export default function App() {
                         const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === key);
                         if (utxo) {
                           const finalAmount = String(utxo.amount);
+                          setSellAmountSats(finalAmount);
+                          setPremiumPercent('0'); // Default to 0% (parity)
                           setNewOfferB110(finalAmount);
                           setNewOfferBtc(finalAmount);
                         }
                       } else {
+                        setSellAmountSats('');
+                        setPremiumPercent('0');
                         setNewOfferB110('');
                         setNewOfferBtc('');
                       }
@@ -1601,23 +1654,75 @@ export default function App() {
                       ⚠️ You have no split UTXOs. Please go to the **Bilateral Splitter** tab to split some coins first!
                     </p>
                   )}
+
+                  {selectedBackingUtxoKey && (() => {
+                    const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
+                    if (!utxo) return null;
+                    const chainLabel = utxo.chain === 'main' ? 'BTC' : 'B110';
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                        <div>
+                          <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">
+                            Sell Amount (Sats)
+                          </label>
+                          <input
+                            type="number"
+                            min="100000"
+                            max={utxo.amount}
+                            value={sellAmountSats}
+                            onChange={(e) => handleSellAmountChange(e.target.value)}
+                            placeholder={`Max ${(utxo.amount).toLocaleString()} Sats`}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+                          />
+                          <span className="text-[10px] text-slate-500 mt-1 block">
+                            Available in UTXO: <span className="font-semibold text-slate-400">{(utxo.amount).toLocaleString()} Sats</span> ({(utxo.amount / 100000000).toFixed(4)} {chainLabel})
+                          </span>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">
+                            Market Pricing Adjustment (%)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="-50"
+                            max="50"
+                            value={premiumPercent}
+                            onChange={(e) => handlePremiumChange(e.target.value)}
+                            placeholder="e.g. 5 for 5% premium, -2 for 2% discount"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+                          />
+                          <span className="text-[10px] text-slate-500 mt-1 block">
+                            Adjust buy price relative to 1:1 parity (positive = premium, negative = discount)
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {selectedBackingUtxoKey && newOfferB110 && (() => {
                   const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
                   const isMain = utxo?.chain === 'main';
+                  const premiumVal = Number(premiumPercent) || 0;
+                  const premiumText = premiumVal > 0 
+                    ? `at a +${premiumVal}% premium` 
+                    : premiumVal < 0 
+                    ? `at a ${premiumVal}% discount` 
+                    : `at 1:1 exact parity`;
                   return (
                     <div className="bg-slate-950/40 border border-indigo-900/30 p-4 rounded-xl flex items-center justify-between">
                       <div>
-                        <span className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-1">Swap Exchange Rate (1:1 cross-chain atomic swap)</span>
+                        <span className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-1">Swap Exchange Rate ({premiumText})</span>
                         <span className="text-sm font-semibold text-slate-200">
                           {isMain ? (
                             <>
-                              Selling <span className="text-emerald-400 font-mono">{(Number(newOfferBtc) / 100000000).toFixed(4)} BTC</span> (entirety of selected BTC UTXO) ⇆ Buying <span className="text-sky-400 font-mono">{(Number(newOfferB110) / 100000000).toFixed(4)} B110</span> on BIP110-Chain
+                              Selling <span className="text-emerald-400 font-mono">{(Number(newOfferBtc) / 100000000).toFixed(4)} BTC</span> ⇆ Buying <span className="text-sky-400 font-mono">{(Number(newOfferB110) / 100000000).toFixed(4)} B110</span> on BIP110-Chain
                             </>
                           ) : (
                             <>
-                              Selling <span className="text-sky-400 font-mono">{(Number(newOfferB110) / 100000000).toFixed(4)} B110</span> (entirety of selected BIP110 UTXO) ⇆ Buying <span className="text-emerald-400 font-mono">{(Number(newOfferBtc) / 100000000).toFixed(4)} BTC</span> on Main-Chain
+                              Selling <span className="text-sky-400 font-mono">{(Number(newOfferB110) / 100000000).toFixed(4)} B110</span> ⇆ Buying <span className="text-emerald-400 font-mono">{(Number(newOfferBtc) / 100000000).toFixed(4)} BTC</span> on Main-Chain
                             </>
                           )}
                         </span>
