@@ -63,6 +63,7 @@ interface Offer {
   backingVout?: number;
   backingChain?: 'main' | 'bip110';
   isPending?: boolean;
+  acceptorClaimed?: boolean;
 }
 
 export default function App() {
@@ -1150,7 +1151,8 @@ export default function App() {
         });
 
         const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
-          status: 'CLAIMED'
+          status: 'CLAIMED',
+          acceptorClaimed: true
         });
 
         setSelectedOffer(updateRes.data);
@@ -2263,7 +2265,7 @@ export default function App() {
                         (s.step === 2 && ['FUNDED_INITIATOR', 'FUNDED_ACCEPTOR', 'CLAIMED'].includes(selectedOffer.status)) ||
                         (s.step === 3 && ['FUNDED_ACCEPTOR', 'CLAIMED'].includes(selectedOffer.status)) ||
                         (s.step === 4 && selectedOffer.status === 'CLAIMED' && selectedOffer.preimage) ||
-                        (s.step === 5 && selectedOffer.status === 'CLAIMED' && !selectedOffer.preimage);
+                        (s.step === 5 && selectedOffer.status === 'CLAIMED' && selectedOffer.acceptorClaimed);
 
                       const isActive = s.activeStatus.includes(selectedOffer.status);
 
@@ -2443,7 +2445,7 @@ export default function App() {
                     })()}
 
                     {/* Step 5: Claim B110 / BTC */}
-                    {selectedOffer.status === 'CLAIMED' && selectedOffer.preimage && (() => {
+                    {selectedOffer.status === 'CLAIMED' && selectedOffer.preimage && !selectedOffer.acceptorClaimed && (() => {
                       const isBtcBacking = selectedOffer.backingChain === 'main';
                       const isInitiator = selectedOffer.initiatorPubKey === publicKey;
 
@@ -2477,7 +2479,7 @@ export default function App() {
                     })()}
 
                     {/* Swap Completed / Final State */}
-                    {selectedOffer.status === 'CLAIMED' && !selectedOffer.preimage && (
+                    {selectedOffer.status === 'CLAIMED' && selectedOffer.acceptorClaimed && (
                       <div className="bg-emerald-950/20 border border-emerald-900/60 p-5 rounded-xl text-center">
                         <CheckCircle className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
                         <h4 className="text-sm font-bold text-emerald-200">Swap Execution Completed!</h4>

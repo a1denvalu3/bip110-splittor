@@ -28,6 +28,7 @@ interface Offer {
     backingTxid?: string;
     backingVout?: number;
     backingChain?: 'main' | 'bip110';
+    acceptorClaimed?: boolean;
 }
 
 const offers: Record<string, Offer> = {};
@@ -299,7 +300,7 @@ app.post('/api/offers/:id/accept', (req: Request, res: Response) => {
 // 4. Update HTLC Contracts / Txids
 app.post('/api/offers/:id/update', (req: Request, res: Response) => {
     const id = req.params.id as string;
-    const { b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid, preimage, status } = req.body;
+    const { b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid, preimage, status, acceptorClaimed } = req.body;
 
     const offer = offers[id];
     if (!offer) {
@@ -312,6 +313,7 @@ app.post('/api/offers/:id/update', (req: Request, res: Response) => {
     if (btcHtlcTxid) offer.btcHtlcTxid = btcHtlcTxid;
     if (preimage) offer.preimage = preimage;
     if (status) offer.status = status;
+    if (acceptorClaimed !== undefined) offer.acceptorClaimed = acceptorClaimed;
 
     res.json(offer);
 });
