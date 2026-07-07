@@ -239,19 +239,31 @@ export class PureBitcoinSwap {
         outputSats: bigint,
         htlcAddr: string,
         splitDestPayment: bitcoin.payments.Payment,
+        merkleRoot: Buffer = Buffer.alloc(0),
+        changeAddr?: string,
         network: bitcoin.Network = bitcoin.networks.regtest
     ): bitcoin.Transaction {
         const tx = new bitcoin.Transaction();
         tx.version = 2;
         tx.addInput(Buffer.from(splitTxid, 'hex').reverse(), outputIndex);
+        
+        // 1. Add HTLC contract output
         tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), outputSats);
+
+        // 2. Add change output if there's leftover change and a change address is provided
+        const fee = BigInt(5000); // 5000 sats is plenty for standard Taproot txs
+        const changeSats = inputSats - outputSats - fee;
+
+        if (changeSats > 0n && changeAddr) {
+            tx.addOutput(bitcoin.address.toOutputScript(changeAddr, network), changeSats);
+        }
 
         const sighash = tx.hashForWitnessV1(
             0, [splitDestPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
         );
 
-        // Sign the funding spend (P2TR Keypath spend with empty tweak for pure Keypath output)
-        const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, Buffer.alloc(0), network);
+        // Sign the funding spend (P2TR Keypath spend with the given merkleRoot tweak)
+        const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, merkleRoot, network);
         const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
 
         tx.setWitness(0, [sig]);
