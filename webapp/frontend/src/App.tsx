@@ -527,30 +527,47 @@ export default function App() {
 
     try {
       if (step === 2) {
-        // Step 2: Fund B110 HTLC (Performed locally)
-        showToast('Building B110 HTLC contract locally...', 'info');
+        // Step 2: Fund first HTLC (Performed locally by Initiator)
+        const isBtcBacking = selectedOffer.backingChain === 'main';
+        const targetChain: 'main' | 'bip110' = isBtcBacking ? 'main' : 'bip110';
+        const targetAmount = isBtcBacking ? selectedOffer.acceptorBtcAmount : selectedOffer.initiatorB110Amount;
+
+        showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
         
         // 1. Generate HTLC outputs locally
+        const recipientPubKey = isBtcBacking 
+          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
+          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const refundPubKey = isBtcBacking 
+          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
+          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+
         const htlc = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
-          Buffer.from(selectedOffer.acceptorPubKey!, 'hex'),
-          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          recipientPubKey,
+          refundPubKey,
           selectedOffer.lockTime,
           net
         );
 
-        // 2. Fetch split UTXOs of initiator on Knots
-        let utxo = bip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout)
-          || ownBip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
-
-        // Fallback if not found (e.g. legacy offers or edge cases)
-        if (!utxo) {
-          const splitB110Utxos = bip110Utxos.filter(u => isBip110UtxoSplit(u));
-          utxo = splitB110Utxos[0] || ownBip110Utxos[0];
+        // 2. Fetch split UTXOs of initiator on targetChain
+        let utxo;
+        if (isBtcBacking) {
+          utxo = ownMainUtxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
+          if (!utxo) {
+            utxo = ownMainUtxos[0];
+          }
+        } else {
+          utxo = bip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout)
+            || ownBip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
+          if (!utxo) {
+            const splitB110Utxos = bip110Utxos.filter(u => isBip110UtxoSplit(u));
+            utxo = splitB110Utxos[0] || ownBip110Utxos[0];
+          }
         }
 
-        if (!utxo) throw new Error("No split UTXO found on BIP110-Chain! Split your coins first on Main-Chain.");
+        if (!utxo) throw new Error(`No split UTXO found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! Split your coins first.`);
 
         // 3. Build & sign funding transaction locally!
         const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
@@ -558,8 +575,7 @@ export default function App() {
 
         let splitDestPayment: bitcoin.payments.Payment;
         
-        // If the UTXO is on the P2TR split contract address itself, we must use split contract payment
-        const isParentSplitAddress = !ownBip110Utxos.some(u => u.txid === utxo!.txid && u.vout === utxo!.vout);
+        const isParentSplitAddress = !isBtcBacking && !ownBip110Utxos.some(u => u.txid === utxo!.txid && u.vout === utxo!.vout);
         if (isParentSplitAddress) {
           const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
           splitDestPayment = splitPayment.payment;
@@ -570,13 +586,12 @@ export default function App() {
           });
         }
 
-        // The funding tx spends the unspent contract UTXO via Keypath (tweaked key)
         const tx = PureBitcoinSwap.buildHtlcFundingTx(
           keyPair,
           utxo.txid,
           utxo.vout,
           BigInt(utxo.amount),
-          BigInt(selectedOffer.initiatorB110Amount),
+          BigInt(targetAmount),
           htlc.address!,
           splitDestPayment,
           net
@@ -585,44 +600,97 @@ export default function App() {
         // 4. Broadcast via server
         const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
-          chain: 'bip110',
+          chain: targetChain,
           networkMode
         });
 
         // 5. Update Offer State on server
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
-          b110HtlcAddress: htlc.address!,
-          b110HtlcTxid: broadcastRes.data.txid,
+        const updateParams: any = {
           status: 'FUNDED_INITIATOR'
-        });
+        };
+        if (isBtcBacking) {
+          updateParams.btcHtlcAddress = htlc.address!;
+          updateParams.btcHtlcTxid = broadcastRes.data.txid;
+        } else {
+          updateParams.b110HtlcAddress = htlc.address!;
+          updateParams.b110HtlcTxid = broadcastRes.data.txid;
+        }
+
+        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, updateParams);
 
         setSelectedOffer(updateRes.data);
-        showToast('BIP110 HTLC successfully funded!', 'success');
+        showToast(`${targetChain === 'main' ? 'Bitcoin' : 'BIP110'} HTLC successfully funded!`, 'success');
       } 
       
       else if (step === 3) {
-        // Step 3: Fund BTC HTLC (Performed locally)
-        showToast('Building BTC HTLC contract locally...', 'info');
+        // Step 3: Fund second HTLC (Performed locally by Acceptor)
+        const isBtcBacking = selectedOffer.backingChain === 'main';
+        const targetChain: 'main' | 'bip110' = isBtcBacking ? 'bip110' : 'main';
+        const targetAmount = isBtcBacking ? selectedOffer.initiatorB110Amount : selectedOffer.acceptorBtcAmount;
 
-        // 1. Generate HTLC outputs locally
-        const htlc = PureBitcoinSwap.createTaprootHtlc(
+        // Security check first: Verify the initiator's first HTLC address matches the expected script
+        const firstHtlcAddress = isBtcBacking ? selectedOffer.btcHtlcAddress! : selectedOffer.b110HtlcAddress!;
+        const firstHtlcRecipient = isBtcBacking 
+          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
+          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const firstHtlcRefund = isBtcBacking 
+          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
+          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+
+        showToast(`Verifying initiator's ${isBtcBacking ? 'BTC' : 'BIP110'} HTLC address first...`, 'info');
+
+        const isFirstHtlcValid = PureBitcoinSwap.verifyTaprootHtlcAddress(
+          firstHtlcAddress,
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
-          Buffer.from(selectedOffer.initiatorPubKey, 'hex'), 
-          Buffer.from(selectedOffer.acceptorPubKey!, 'hex'),    
+          firstHtlcRecipient,
+          firstHtlcRefund,
           selectedOffer.lockTime,
           net
         );
 
-        // 2. Fetch split outputs of acceptor on Core (spending from their ownAddress)
-        const splitDestRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: ownAddress,
-          chain: 'main',
-          networkMode
-        });
-        
-        const utxo = splitDestRes.data.utxos[0];
-        if (!utxo) throw new Error("No split UTXO found on Bitcoin! Split your coins first.");
+        if (!isFirstHtlcValid) {
+          throw new Error(`CRITICAL SECURITY WARNING: The initiator's ${isBtcBacking ? 'BTC' : 'BIP110'} HTLC address is INVALID or has been tampered with!`);
+        }
+
+        showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
+
+        // 1. Generate second HTLC outputs locally
+        const secondHtlcRecipient = isBtcBacking 
+          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
+          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const secondHtlcRefund = isBtcBacking 
+          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
+          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+
+        const htlc = PureBitcoinSwap.createTaprootHtlc(
+          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          Buffer.from(selectedOffer.hashLock, 'hex'),
+          secondHtlcRecipient,
+          secondHtlcRefund,
+          selectedOffer.lockTime,
+          net
+        );
+
+        // 2. Fetch split outputs of acceptor on targetChain
+        let utxo;
+        if (targetChain === 'main') {
+          const splitDestRes = await axios.post(`${API_BASE}/wallet/utxos`, {
+            address: ownAddress,
+            chain: 'main',
+            networkMode
+          });
+          utxo = splitDestRes.data.utxos[0];
+        } else {
+          const splitB110Utxos = [
+            ...ownBip110Utxos,
+            ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
+          ];
+          const uniqueBip110Utxos = splitB110Utxos.filter((v: any, i: any, a: any) => a.findIndex((t: any) => t.txid === v.txid && t.vout === v.vout) === i);
+          utxo = uniqueBip110Utxos[0];
+        }
+
+        if (!utxo) throw new Error(`No split UTXO found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! Split your coins first.`);
 
         // 3. Build & sign funding transaction locally!
         const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
@@ -637,7 +705,7 @@ export default function App() {
           utxo.txid,
           utxo.vout,
           BigInt(utxo.amount),
-          BigInt(selectedOffer.acceptorBtcAmount),
+          BigInt(targetAmount),
           htlc.address!,
           splitDestPayment,
           net
@@ -646,32 +714,67 @@ export default function App() {
         // 4. Broadcast via server
         const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
-          chain: 'main',
+          chain: targetChain,
           networkMode
         });
 
         // 5. Update Offer State on server
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
-          btcHtlcAddress: htlc.address!,
-          btcHtlcTxid: broadcastRes.data.txid,
+        const updateParams: any = {
           status: 'FUNDED_ACCEPTOR'
-        });
+        };
+        if (targetChain === 'main') {
+          updateParams.btcHtlcAddress = htlc.address!;
+          updateParams.btcHtlcTxid = broadcastRes.data.txid;
+        } else {
+          updateParams.b110HtlcAddress = htlc.address!;
+          updateParams.b110HtlcTxid = broadcastRes.data.txid;
+        }
+
+        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, updateParams);
 
         setSelectedOffer(updateRes.data);
-        showToast('Bitcoin HTLC successfully funded!', 'success');
+        showToast(`${targetChain === 'main' ? 'Bitcoin' : 'BIP110'} HTLC successfully funded!`, 'success');
       } 
       
       else if (step === 4) {
-        // Step 4: Claim BTC (Performed locally)
-        showToast('Signing BTC Claim transaction with local preimage...', 'info');
+        // Step 4: Claim second HTLC (Performed locally by Initiator)
+        const isBtcBacking = selectedOffer.backingChain === 'main';
+        const targetChain: 'main' | 'bip110' = isBtcBacking ? 'bip110' : 'main';
+        const targetAddress = isBtcBacking ? selectedOffer.b110HtlcAddress! : selectedOffer.btcHtlcAddress!;
+
+        showToast(`Verifying acceptor's ${targetChain === 'main' ? 'BTC' : 'BIP110'} HTLC address first...`, 'info');
+
+        // Security check: Verify that the acceptor's HTLC address matches the expected script
+        const secondHtlcRecipient = isBtcBacking 
+          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
+          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const secondHtlcRefund = isBtcBacking 
+          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
+          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+
+        const isSecondHtlcValid = PureBitcoinSwap.verifyTaprootHtlcAddress(
+          targetAddress,
+          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          Buffer.from(selectedOffer.hashLock, 'hex'),
+          secondHtlcRecipient,
+          secondHtlcRefund,
+          selectedOffer.lockTime,
+          net
+        );
+
+        if (!isSecondHtlcValid) {
+          throw new Error(`CRITICAL SECURITY WARNING: The acceptor's ${targetChain === 'main' ? 'BTC' : 'BIP110'} HTLC address is INVALID or has been tampered with!`);
+        }
+
+        showToast(`Signing ${targetChain === 'main' ? 'BTC' : 'B110'} Claim transaction with local preimage...`, 'info');
 
         const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: selectedOffer.btcHtlcAddress,
-          chain: 'main',
+          address: targetAddress,
+          chain: targetChain,
           networkMode
         });
         const utxo = htlcUtxosRes.data.utxos[0];
-        if (!utxo) throw new Error("Could not find the funded UTXO on the BTC HTLC. If on regtest, mine a block.");
+        if (!utxo) throw new Error(`Could not find the funded UTXO on the ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC. If on regtest, mine a block.`);
 
         // Retrieve local preimage securely stored
         const savedPreimage = localStorage.getItem(`preimage_${selectedOffer.id}`);
@@ -682,8 +785,8 @@ export default function App() {
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
-          Buffer.from(keyPair.publicKey),
-          Buffer.from(selectedOffer.acceptorPubKey!, 'hex'),
+          secondHtlcRecipient,
+          secondHtlcRefund,
           selectedOffer.lockTime,
           net
         );
@@ -699,7 +802,7 @@ export default function App() {
           Buffer.from(savedPreimage, 'hex'), 
           htlcPayment,
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
-          Buffer.from(selectedOffer.acceptorPubKey!, 'hex'),
+          secondHtlcRefund,
           selectedOffer.lockTime,
           net
         );
@@ -707,7 +810,7 @@ export default function App() {
         // Broadcast raw tx
         const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
-          chain: 'main',
+          chain: targetChain,
           networkMode
         });
 
@@ -718,28 +821,56 @@ export default function App() {
         });
 
         setSelectedOffer(updateRes.data);
-        showToast('BTC claimed successfully! Preimage revealed.', 'success');
+        showToast(`${targetChain === 'main' ? 'BTC' : 'B110'} claimed successfully! Preimage revealed.`, 'success');
       } 
       
       else if (step === 5) {
-        // Step 5: Claim B110 (Performed locally)
-        showToast('Signing B110 Claim transaction with extracted preimage...', 'info');
+        // Step 5: Claim first HTLC (Performed locally by Acceptor)
+        const isBtcBacking = selectedOffer.backingChain === 'main';
+        const targetChain: 'main' | 'bip110' = isBtcBacking ? 'main' : 'bip110';
+        const targetAddress = isBtcBacking ? selectedOffer.btcHtlcAddress! : selectedOffer.b110HtlcAddress!;
+
+        showToast(`Verifying ${targetChain === 'main' ? 'BTC' : 'BIP110'} HTLC address first...`, 'info');
+
+        // Security check: Verify that the first HTLC address matches the expected script
+        const firstHtlcRecipient = isBtcBacking 
+          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
+          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const firstHtlcRefund = isBtcBacking 
+          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
+          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+
+        const isFirstHtlcValid = PureBitcoinSwap.verifyTaprootHtlcAddress(
+          targetAddress,
+          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          Buffer.from(selectedOffer.hashLock, 'hex'),
+          firstHtlcRecipient,
+          firstHtlcRefund,
+          selectedOffer.lockTime,
+          net
+        );
+
+        if (!isFirstHtlcValid) {
+          throw new Error(`CRITICAL SECURITY WARNING: The first HTLC (${targetChain === 'main' ? 'BTC' : 'BIP110'}) address is INVALID or has been tampered with!`);
+        }
+
+        showToast(`Signing ${targetChain === 'main' ? 'BTC' : 'B110'} Claim transaction with extracted preimage...`, 'info');
 
         const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: selectedOffer.b110HtlcAddress,
-          chain: 'bip110',
+          address: targetAddress,
+          chain: targetChain,
           networkMode
         });
         const utxo = htlcUtxosRes.data.utxos[0];
-        if (!utxo) throw new Error("Could not find funded UTXO on B110 HTLC address.");
+        if (!utxo) throw new Error(`Could not find funded UTXO on ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC address.`);
 
         // Build and sign claim transaction locally!
         const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
-          Buffer.from(selectedOffer.acceptorPubKey!, 'hex'), // recipient
-          Buffer.from(selectedOffer.initiatorPubKey, 'hex'), // refund
+          firstHtlcRecipient,
+          firstHtlcRefund,
           selectedOffer.lockTime,
           net
         );
@@ -755,14 +886,14 @@ export default function App() {
           Buffer.from(selectedOffer.preimage!, 'hex'), // preimage hex
           htlcPayment,
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
-          Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
+          firstHtlcRefund,
           selectedOffer.lockTime,
           net
         );
 
         await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
-          chain: 'bip110',
+          chain: targetChain,
           networkMode
         });
 
@@ -771,7 +902,7 @@ export default function App() {
         });
 
         setSelectedOffer(updateRes.data);
-        showToast('B110 claimed! Atomic swap finished successfully.', 'success');
+        showToast(`${targetChain === 'main' ? 'BTC' : 'B110'} claimed successfully! Swap fully completed.`, 'success');
       }
 
       await fetchBalances();
@@ -1556,6 +1687,12 @@ export default function App() {
                               </span>
                             </div>
                             <div className="flex justify-between">
+                              <span className="text-slate-500 font-medium">Refund Locktime (T):</span>
+                              <span className="font-semibold text-amber-500">
+                                {o.lockTime} blocks (~{((o.lockTime * 10) / 60).toFixed(1)} hrs)
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
                               <span className="text-slate-500 font-medium">Taker Status:</span>
                               <span className={`font-semibold ${match ? 'text-emerald-400' : 'text-rose-400'}`}>
                                 {match ? '✔️ Match Ready' : `❌ Missing split ${requiredChain}`}
@@ -1650,6 +1787,12 @@ export default function App() {
 
                         <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
                           <div className="flex justify-between">
+                            <span className="text-slate-500 font-medium">Refund Locktime (T):</span>
+                            <span className="font-semibold text-amber-500">
+                              {o.lockTime} blocks (~{((o.lockTime * 10) / 60).toFixed(1)} hrs)
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
                             <span className="text-slate-500 font-medium">Taker Status:</span>
                             <span className={`font-semibold ${o.status !== 'OPEN' ? 'text-indigo-400' : 'text-slate-400'}`}>
                               {o.status === 'OPEN' ? 'No taker yet' : '✔️ Accepted by Counterparty!'}
@@ -1714,6 +1857,12 @@ export default function App() {
                     <div className="bg-slate-950 border border-slate-850 px-4 py-2.5 rounded-xl text-center">
                       <span className="text-[10px] text-slate-500 uppercase block font-semibold">Buy Volume</span>
                       <span className="text-sm font-bold text-emerald-400">{(selectedOffer.acceptorBtcAmount / 100000000).toFixed(4)} BTC</span>
+                    </div>
+                    <div className="bg-slate-950 border border-slate-850 px-4 py-2.5 rounded-xl text-center">
+                      <span className="text-[10px] text-slate-500 uppercase block font-semibold">Locktime (T / T/2)</span>
+                      <span className="text-sm font-bold text-amber-500">
+                        {selectedOffer.lockTime} / {selectedOffer.lockTime / 2} blocks
+                      </span>
                     </div>
                   </div>
                 </div>
