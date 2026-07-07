@@ -10,13 +10,17 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 class BitcoinRpc {
     private url: string;
+    private walletUrl: string;
     constructor(port: number) {
         this.url = `http://user:password@127.0.0.1:${port}/`;
+        this.walletUrl = `http://user:password@127.0.0.1:${port}/wallet/miner`;
     }
 
     async call(method: string, params: any[] = []): Promise<any> {
+        const walletMethods = ['getnewaddress', 'sendtoaddress', 'listunspent', 'getbalance'];
+        const targetUrl = walletMethods.includes(method) ? this.walletUrl : this.url;
         try {
-            const response = await axios.post(this.url, {
+            const response = await axios.post(targetUrl, {
                 jsonrpc: '1.0',
                 id: 'regtest',
                 method,
@@ -76,7 +80,7 @@ async function runSplitPrimitiveTest() {
         await sleep(2000);
     } catch {}
 
-    // 3. Shared ancestry blocks 1-110
+    // 3. Shared ancestry blocks 1-110 (Activates BIP110 consensus rules on Knots from genesis)
     console.log("\n3. Mining 110 blocks of shared history...");
     const sharedMinerAddr = await mainRpc.call('getnewaddress');
     await mainRpc.call('generatetoaddress', [110, sharedMinerAddr]);
@@ -91,7 +95,7 @@ async function runSplitPrimitiveTest() {
     }
     console.log(`   - Main Height: ${heightMain}, BIP110 Height: ${heightBip110}`);
 
-    // 4. Create and Fund Split Output (Block 101)
+    // 4. Create and Fund Split Output
     console.log("\n4. Funding the Split outputs for Initiator and Acceptor with 10 BTC each...");
     const initiator = PureBitcoinSwap.generateKeyPair();
     const { payment: splitPayment, script: splitScript } = PureBitcoinSwap.createSplitPayment(Buffer.from(initiator.publicKey), bitcoin.networks.regtest);
@@ -107,8 +111,8 @@ async function runSplitPrimitiveTest() {
     const accFundTxid = await mainRpc.call('sendtoaddress', [accSplitAddress, 10.0]);
     await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
     await sleep(1000); // sync
-    console.log(`   - Block 101 Mined. Initiator Fund TxID: ${fundTxid}`);
-    console.log(`   - Block 101 Mined. Acceptor Fund TxID : ${accFundTxid}`);
+    console.log(`   - Fund Block Mined. Initiator Fund TxID: ${fundTxid}`);
+    console.log(`   - Fund Block Mined. Acceptor Fund TxID : ${accFundTxid}`);
 
     // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
     console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
@@ -139,16 +143,10 @@ async function runSplitPrimitiveTest() {
     const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [rawAccMainHex]);
     console.log(`   - Acceptor split accepted on Main-Chain! TxID: ${accSplitTxidMain}`);
 
-    console.log("   - Mining the OP_IF transactions on Main-Chain (Block 112)...");
-    const blocksMined = await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
-    const block112Hash = blocksMined[0];
+    console.log("   - Mining the OP_IF transactions on Main-Chain...");
+    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
 
-    console.log("   - ENFORCING BIP110 CONSENSUS RULE (Banning Block 112 on Knots)...");
-    // Under BIP110 consensus rules, Block 112 is invalid because it contains the OP_IF transaction.
-    // We enforce this consensus rule on the Knots node by explicitly invalidating Block 112.
-    // This instructs the Knots node to permanently reject this block and all blocks built on it,
-    // establishing the separate post-fork chain tips, while keeping peer connections intact!
-    await bip110Rpc.call('invalidateblock', [block112Hash]);
+    console.log("   - Knots natively rejects the invalid block containing OP_IF (BIP110 consensus enforced).");
 
     console.log("   - Waiting for state reorganization...");
     await sleep(2000);
@@ -167,6 +165,39 @@ async function runSplitPrimitiveTest() {
         console.error("   - ❌ FAILURE! Knots did not revert height!");
         process.exit(1);
     }
+
+    // Validate UTXOs on Core (Main-Chain) after split is mined on Core
+    console.log("\n6b. Verifying UTXO state on Main-Chain...");
+    const parentUtxoMain = await mainRpc.call('gettxout', [fundTxid, outputIndex]);
+    const parentAccUtxoMain = await mainRpc.call('gettxout', [accFundTxid, accOutputIndex]);
+    
+    if (parentUtxoMain !== null || parentAccUtxoMain !== null) {
+        console.error("❌ FAILURE: Parent contract UTXOs are still unspent on Main-Chain after scriptpath split!");
+        process.exit(1);
+    }
+    console.log("   - ✔️ Success: Parent contract UTXOs are spent on Main-Chain.");
+
+    const newSplitUtxoMain = await mainRpc.call('gettxout', [splitTxidMain, 0]);
+    const newAccSplitUtxoMain = await mainRpc.call('gettxout', [accSplitTxidMain, 0]);
+    if (newSplitUtxoMain === null || newAccSplitUtxoMain === null) {
+        console.error("❌ FAILURE: New split UTXOs are not found/confirmed on Main-Chain!");
+        process.exit(1);
+    }
+    console.log(`   - ✔️ Success: New split UTXOs are confirmed on Main-Chain:
+     Initiator: ${newSplitUtxoMain.value} BTC
+     Acceptor : ${newAccSplitUtxoMain.value} BTC`);
+
+    // Verify Knots (BIP110-Chain) before executing BIP110 spend
+    console.log("\n6c. Verifying parent UTXO state on BIP110-Chain (Should still be UNSPENT)...");
+    const parentUtxoBip110 = await bip110Rpc.call('gettxout', [fundTxid, outputIndex]);
+    const parentAccUtxoBip110 = await bip110Rpc.call('gettxout', [accFundTxid, accOutputIndex]);
+    if (parentUtxoBip110 === null || parentAccUtxoBip110 === null) {
+        console.error("❌ FAILURE: Parent contract UTXOs were spent on BIP110-Chain despite BIP110 consensus rules!");
+        process.exit(1);
+    }
+    console.log(`   - ✔️ Success: Parent contract UTXOs remain unspent and completely valid on BIP110-Chain:
+     Initiator: ${parentUtxoBip110.value} BTC
+     Acceptor : ${parentAccUtxoBip110.value} BTC`);
 
     // 7. Replay Verification: BIP110 MUST reject the Main Chain spends (both should fail)
     console.log("\n7. Replaying Main Chain spends to BIP110 Node (Should FAIL)...");
@@ -220,6 +251,25 @@ async function runSplitPrimitiveTest() {
 
     const minerAddrBip110 = await bip110Rpc.call('getnewaddress');
     await bip110Rpc.call('generatetoaddress', [1, minerAddrBip110]);
+
+    console.log("\n8b. Verifying UTXO state on BIP110-Chain after keypath spend...");
+    const parentUtxoBip110Post = await bip110Rpc.call('gettxout', [fundTxid, outputIndexBip110]);
+    const parentAccUtxoBip110Post = await bip110Rpc.call('gettxout', [accFundTxid, accOutputIndexBip110]);
+    if (parentUtxoBip110Post !== null || parentAccUtxoBip110Post !== null) {
+        console.error("❌ FAILURE: Parent contract UTXOs are still unspent on BIP110-Chain after keypath split!");
+        process.exit(1);
+    }
+    console.log("   - ✔️ Success: Parent contract UTXOs are spent on BIP110-Chain.");
+
+    const newSplitUtxoBip110 = await bip110Rpc.call('gettxout', [splitTxidBip110, 0]);
+    const newAccSplitUtxoBip110 = await bip110Rpc.call('gettxout', [accSplitTxidBip110, 0]);
+    if (newSplitUtxoBip110 === null || newAccSplitUtxoBip110 === null) {
+        console.error("❌ FAILURE: New keypath split UTXOs are not found/confirmed on BIP110-Chain!");
+        process.exit(1);
+    }
+    console.log(`   - ✔️ Success: New keypath split UTXOs are confirmed on BIP110-Chain:
+     Initiator: ${newSplitUtxoBip110.value} B110
+     Acceptor : ${newAccSplitUtxoBip110.value} B110`);
 
     console.log("\n==================================================");
     console.log("🎉 COIN SPLIT PRIMITIVE TEST COMPLETED SUCCESSFULLY!");

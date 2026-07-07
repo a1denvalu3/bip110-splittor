@@ -18,7 +18,7 @@ services:
       - -fallbackfee=0.0001
 
   bitcoind-bip110:
-    image: bitcoinknots/bitcoin:latest
+    image: ghcr.io/retropex/bitcoin:29.3.knots20260210-bip110-v0.4.1
     container_name: bitcoind-bip110
     ports:
       - "18444:18443" # RPC port
@@ -32,4 +32,4 @@ services:
       - -server=1
       - -txindex=1
       - -fallbackfee=0.0001
-      - -consensusrules=rdts
+      - -vbparams=reduced_data:-1:999999999999

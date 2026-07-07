@@ -10,13 +10,17 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 class BitcoinRpc {
     private url: string;
+    private walletUrl: string;
     constructor(port: number) {
         this.url = `http://user:password@127.0.0.1:${port}/`;
+        this.walletUrl = `http://user:password@127.0.0.1:${port}/wallet/miner`;
     }
 
     async call(method: string, params: any[] = []): Promise<any> {
+        const walletMethods = ['getnewaddress', 'sendtoaddress', 'listunspent', 'getbalance'];
+        const targetUrl = walletMethods.includes(method) ? this.walletUrl : this.url;
         try {
-            const response = await axios.post(this.url, {
+            const response = await axios.post(targetUrl, {
                 jsonrpc: '1.0',
                 id: 'regtest',
                 method,
@@ -76,7 +80,7 @@ async function runFullSwapTest() {
         await sleep(2000);
     } catch {}
 
-    // 3. Shared ancestry blocks 1-110
+    // 3. Shared ancestry blocks 1-110 (Activates BIP110 consensus rules on Knots from genesis)
     console.log("\n3. Mining 110 blocks of shared history...");
     const sharedMinerAddr = await mainRpc.call('getnewaddress');
     await mainRpc.call('generatetoaddress', [110, sharedMinerAddr]);
@@ -167,11 +171,7 @@ async function runFullSwapTest() {
     // Broadcast both to Main-Chain
     const initSplitTxidMain = await mainRpc.call('sendrawtransaction', [initMainSplitTx.toHex()]);
     const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [accMainSplitTx.toHex()]);
-    const blocksMined = await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
-    const block102Hash = blocksMined[0];
-
-    console.log("   - ENFORCING BIP110 CONSENSUS RULE (Banning Block 102 on Knots)...");
-    await bip110Rpc.call('invalidateblock', [block102Hash]);
+    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
     await sleep(2000);
 
     console.log(`   - Main-Chain Block 102 Mined. Initiator Split UTXO: ${initSplitTxidMain}. Acceptor Split UTXO: ${accSplitTxidMain}`);

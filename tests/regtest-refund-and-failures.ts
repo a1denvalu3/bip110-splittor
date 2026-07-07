@@ -10,13 +10,17 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 class BitcoinRpc {
     private url: string;
+    private walletUrl: string;
     constructor(port: number) {
         this.url = `http://user:password@127.0.0.1:${port}/`;
+        this.walletUrl = `http://user:password@127.0.0.1:${port}/wallet/miner`;
     }
 
     async call(method: string, params: any[] = []): Promise<any> {
+        const walletMethods = ['getnewaddress', 'sendtoaddress', 'listunspent', 'getbalance'];
+        const targetUrl = walletMethods.includes(method) ? this.walletUrl : this.url;
         try {
-            const response = await axios.post(this.url, {
+            const response = await axios.post(targetUrl, {
                 jsonrpc: '1.0',
                 id: 'regtest',
                 method,
@@ -75,7 +79,7 @@ async function runRefundAndFailureTest() {
         await sleep(2000);
     } catch {}
 
-    // 3. Shared ancestry blocks 1-110
+    // 3. Shared ancestry blocks 1-110 (Activates BIP110 consensus rules on Knots from genesis)
     console.log("\n3. Mining 110 blocks of shared history...");
     const sharedMinerAddr = await mainRpc.call('getnewaddress');
     await mainRpc.call('generatetoaddress', [110, sharedMinerAddr]);
@@ -111,7 +115,7 @@ async function runRefundAndFailureTest() {
     // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
     console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
     console.log("   - Nodes are fully connected over P2P initially.");
-    console.log("   - We will mine the OP_IF block on Core and then invalidate it on Knots to force the consensus split!");
+    console.log("   - We will mine the OP_IF block on Core and let Knots reject it natively.");
 
     const outputIndex = await findOutputIndex(mainRpc, fundTxid, Buffer.from(splitPayment.output!).toString('hex'));
     const receiverAddrMain = await mainRpc.call('getnewaddress');
@@ -120,11 +124,9 @@ async function runRefundAndFailureTest() {
     );
     const rawMainHex = mainSpendTx.toHex();
     await mainRpc.call('sendrawtransaction', [rawMainHex]);
-    const blocksMined = await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
-    const block102Hash = blocksMined[0];
+    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
 
-    console.log("   - ENFORCING BIP110 CONSENSUS RULE (Banning Block 102 on Knots)...");
-    await bip110Rpc.call('invalidateblock', [block102Hash]);
+    console.log("   - Knots natively rejects the invalid block containing OP_IF (BIP110 consensus enforced).");
     await sleep(2000);
 
     // 6. Split coins on BIP110-Chain using Keypath Schnorr spend
