@@ -1665,7 +1665,7 @@ export default function App() {
                                   <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
                                     u.confirmations < 1 
                                       ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
-                                      : 'bg-sky-950/30 border-sky-800/40 text-sky-400 animate-pulse'
+                                      : 'bg-sky-950/30 border-sky-800/40 text-sky-400'
                                   }`}>
                                     {u.confirmations < 1 ? '🛡️ PENDING' : '🛡️ Split'}
                                   </span>
@@ -1683,6 +1683,23 @@ export default function App() {
                             </div>
                           )
                         })}
+
+                        {/* Render Already Split BIP110 UTXOs on ownAddress */}
+                        {ownBip110Utxos.map((u, i) => (
+                          <div key={`split-b110-${i}`} className="bg-slate-900/40 border border-sky-950 p-2.5 rounded-xl text-xs flex justify-between items-center shadow-sm shadow-sky-500/5">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
+                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                u.confirmations < 1 
+                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
+                                  : 'bg-sky-950/30 border-sky-800/40 text-sky-400'
+                              }`}>
+                                {u.confirmations < 1 ? '🛡️ PENDING' : '🛡️ Split'}
+                              </span>
+                            </div>
+                            <span className="font-semibold text-sky-400">{(u.amount / 100000000).toFixed(4)} B110</span>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -1813,7 +1830,29 @@ export default function App() {
                       </div>
                     ))}
 
-                    {ownMainUtxos.length === 0 && bip110Utxos.filter(u => isBip110UtxoSplit(u)).length === 0 && (
+                    {/* Render split UTXOs on BIP110-Chain (ownAddress) */}
+                    {ownBip110Utxos.map((u, i) => (
+                      <div key={`split-b110-own-tab-${i}`} className="bg-slate-900/30 border border-sky-950/50 p-3.5 rounded-xl text-xs flex justify-between items-center opacity-80">
+                        <div className="flex items-center gap-3">
+                          <div className="flex flex-col">
+                            <span className="font-mono text-slate-300 text-xs truncate w-32 sm:w-64">{u.txid}:{u.vout}</span>
+                            <span className="text-[10px] text-slate-500">
+                              Confirmations: {u.confirmations} {u.confirmations < 1 && <span className="text-amber-500 font-bold ml-1.5 animate-pulse">(PENDING)</span>}
+                            </span>
+                          </div>
+                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded self-start ${
+                            u.confirmations < 1
+                              ? 'bg-amber-950/30 border border-amber-900/40 text-amber-400 animate-pulse'
+                              : 'bg-sky-950/30 border border-sky-900/40 text-sky-400'
+                          }`}>
+                            {u.confirmations < 1 ? '🛡️ Split (PENDING)' : '🛡️ Split (BIP110)'}
+                          </span>
+                        </div>
+                        <span className="font-semibold text-slate-300">{(u.amount / 100000000).toFixed(4)} B110</span>
+                      </div>
+                    ))}
+
+                    {ownMainUtxos.length === 0 && ownBip110Utxos.length === 0 && bip110Utxos.filter(u => isBip110UtxoSplit(u)).length === 0 && (
                       <div className="text-center py-6 border border-slate-900 bg-slate-950/20 rounded-xl text-xs text-slate-600">
                         No split UTXOs detected yet. Select an unsplit UTXO above to split!
                       </div>
