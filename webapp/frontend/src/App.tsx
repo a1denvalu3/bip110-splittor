@@ -501,6 +501,29 @@ export default function App() {
     }
   }, [splitAddress, ownAddress, activeTab, networkMode]);
 
+  // Poll node info, marketplace offers, and wallet balances/UTXOs every 3 seconds for active, real-time updates
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchNodeInfo();
+      fetchOffers();
+      if (splitAddress && ownAddress) {
+        fetchBalances();
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [networkMode, splitAddress, ownAddress]);
+
+  // Keep selectedOffer in sync with the polled offersList to transition wizard steps in real-time
+  useEffect(() => {
+    if (selectedOffer) {
+      const updated = offersList.find(o => o.id === selectedOffer.id);
+      if (updated && JSON.stringify(updated) !== JSON.stringify(selectedOffer)) {
+        setSelectedOffer(updated);
+      }
+    }
+  }, [offersList, selectedOffer]);
+
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 5000);
@@ -1279,17 +1302,35 @@ export default function App() {
 
             {networkMode === 'regtest' ? (
               <div className="flex items-center gap-4">
-                <div className="text-right">
-                  <span className="text-xs text-slate-400 block font-medium">Core Regtest</span>
-                  <span className="text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded-md">
-                    Block #{nodeInfo.mainHeight}
-                  </span>
+                <div className="flex items-center gap-2">
+                  <div className="text-right">
+                    <span className="text-xs text-slate-400 block font-medium">Core Regtest</span>
+                    <span className="text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded-md">
+                      Block #{nodeInfo.mainHeight}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => mineBlocks('main', 1)}
+                    className="px-2 py-1 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-900/40 hover:border-emerald-500 rounded-md transition-all self-end mb-0.5"
+                    title="Mine 1 Block on Bitcoin Core Regtest"
+                  >
+                    +1 Block
+                  </button>
                 </div>
-                <div className="text-right border-l border-slate-800 pl-4">
-                  <span className="text-xs text-slate-400 block font-medium">Knots Regtest</span>
-                  <span className="text-xs font-semibold text-sky-400 bg-sky-950/40 border border-sky-900/60 px-2 py-0.5 rounded-md">
-                    Block #{nodeInfo.bip110Height}
-                  </span>
+                <div className="flex items-center gap-2 border-l border-slate-800 pl-4">
+                  <div className="text-right">
+                    <span className="text-xs text-slate-400 block font-medium">Knots Regtest</span>
+                    <span className="text-xs font-semibold text-sky-400 bg-sky-950/40 border border-sky-900/60 px-2 py-0.5 rounded-md">
+                      Block #{nodeInfo.bip110Height}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => mineBlocks('bip110', 1)}
+                    className="px-2 py-1 text-[10px] font-bold text-sky-400 hover:text-sky-300 bg-sky-950/30 hover:bg-sky-900/40 border border-sky-900/40 hover:border-sky-500 rounded-md transition-all self-end mb-0.5"
+                    title="Mine 1 Block on BIP110 Knots Regtest"
+                  >
+                    +1 Block
+                  </button>
                 </div>
               </div>
             ) : (
