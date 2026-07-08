@@ -34,6 +34,15 @@ import {
 bitcoin.initEccLib(ecc);
 const ECPair: ECPairAPI = ECPairFactory(ecc);
 
+// Deterministically derives child keypair from master private key and index
+const deriveKeyPairForIndex = (masterPrivHex: string, index: number, network: bitcoin.Network): any => {
+  const indexBuf = Buffer.alloc(4);
+  indexBuf.writeUInt32BE(index, 0);
+  const combined = Buffer.concat([Buffer.from(masterPrivHex, 'hex'), indexBuf]);
+  const hash = bitcoin.crypto.sha256(combined);
+  return ECPair.fromPrivateKey(hash, { network });
+};
+
 const API_BASE = 'http://localhost:4000/api';
 
 interface UTXO {
@@ -88,21 +97,17 @@ export default function App() {
   const [isNetworkLocked, setIsNetworkLocked] = useState<boolean>(false);
 
   // Wallet State
+  const [masterPrivateKey, setMasterPrivateKey] = useState<string>('');
+  const [activeIndex, setActiveIndex] = useState<number>(0);
+  const [maxIndex, setMaxIndex] = useState<number>(0);
+
+  // Active derived states (at activeIndex)
   const [privateKey, setPrivateKey] = useState<string>('');
   const [publicKey, setPublicKey] = useState<string>('');
   const [splitAddress, setSplitAddress] = useState<string>('');
   const [ownAddress, setOwnAddress] = useState<string>('');
   const [revealPrivKey, setRevealPrivKey] = useState<boolean>(false);
   const [loadingKeys, setLoadingKeys] = useState<boolean>(false);
-
-  interface WalletKeys {
-    privateKey: string;
-    publicKey: string;
-    splitAddress: string;
-    ownAddress: string;
-    createdAt: number;
-  }
-  const [walletHistory, setWalletHistory] = useState<WalletKeys[]>([]);
 
   // Balances of split contract address
   const [mainBalance, setMainBalance] = useState<number>(0);
@@ -329,8 +334,6 @@ export default function App() {
         if (!utxo) throw new Error("No funded UTXO found on your HTLC contract. Has it already been claimed or refunded?");
 
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
-
-        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
         
         // Reconstruct the HTLC payment details
         const recipientPubKey = isBtcBacking 
@@ -339,6 +342,8 @@ export default function App() {
         const refundPubKey = isBtcBacking 
           ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
           : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+
+        const keyPair = getKeyPairForPubKey(Buffer.from(refundPubKey).toString('hex'), net);
 
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
@@ -403,8 +408,6 @@ export default function App() {
         if (!utxo) throw new Error("No funded UTXO found on your HTLC contract. Has it already been claimed or refunded?");
 
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
-
-        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
         
         // Reconstruct second HTLC payment details
         const secondHtlcRecipient = isBtcBacking 
@@ -413,6 +416,8 @@ export default function App() {
         const secondHtlcRefund = isBtcBacking 
           ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
           : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+
+        const keyPair = getKeyPairForPubKey(Buffer.from(secondHtlcRefund).toString('hex'), net);
 
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
@@ -477,55 +482,72 @@ export default function App() {
     fetchConfig();
   }, []);
 
-  // Load saved keys from LocalStorage on mount or networkMode change
+  // Helper to derive keys and addresses for a given index deterministically
+  const deriveKeysForIndex = (masterPriv: string, index: number, network: bitcoin.Network) => {
+    const childKeyPair = deriveKeyPairForIndex(masterPriv, index, network);
+    const childPublicKey = Buffer.from(childKeyPair.publicKey).toString('hex');
+    const childPrivateKey = Buffer.from(childKeyPair.privateKey!).toString('hex');
+    const splitPayment = PureBitcoinSwap.createSplitPayment(Buffer.from(childKeyPair.publicKey), network);
+    const ownPayment = bitcoin.payments.p2tr({
+      internalPubkey: PureBitcoinSwap.getXOnlyPubKey(Buffer.from(childKeyPair.publicKey)),
+      network
+    });
+    return {
+      privateKey: childPrivateKey,
+      publicKey: childPublicKey,
+      splitAddress: splitPayment.payment.address!,
+      ownAddress: ownPayment.address!
+    };
+  };
+
+  // Find derived keypair in history by public key hex, or return the active keypair as fallback
+  const getKeyPairForPubKey = (pubKeyHex: string, network: bitcoin.Network): any => {
+    for (let i = 0; i <= maxIndex; i++) {
+      const kp = deriveKeyPairForIndex(masterPrivateKey, i, network);
+      if (Buffer.from(kp.publicKey).toString('hex') === pubKeyHex) {
+        return kp;
+      }
+    }
+    // Fallback to active private key
+    return ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network });
+  };
+
+  // Load saved master key and active/max index pointers from LocalStorage on mount or networkMode change
   useEffect(() => {
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
-    
-    // Load history
-    const savedHistoryStr = localStorage.getItem(`${keyPrefix}_p2tr_history`);
-    let historyList: WalletKeys[] = [];
-    if (savedHistoryStr) {
-      try {
-        historyList = JSON.parse(savedHistoryStr);
-        setWalletHistory(historyList);
-      } catch (e) {
-        console.error("Failed to parse wallet history:", e);
+    const net = getNetwork();
+
+    let masterPriv = localStorage.getItem(`${keyPrefix}_master_privkey`);
+    let activeIdx = parseInt(localStorage.getItem(`${keyPrefix}_active_index`) || '0', 10);
+    let maxIdx = parseInt(localStorage.getItem(`${keyPrefix}_max_index`) || '0', 10);
+
+    if (!masterPriv) {
+      // Migrate pre-existing non-master private key to master if exists, or generate a fresh one
+      const oldPriv = localStorage.getItem(`${keyPrefix}_bip110_privkey`);
+      if (oldPriv) {
+        masterPriv = oldPriv;
+      } else {
+        const pair = ECPair.makeRandom();
+        masterPriv = Buffer.from(pair.privateKey!).toString('hex');
       }
+      activeIdx = 0;
+      maxIdx = 0;
+      localStorage.setItem(`${keyPrefix}_master_privkey`, masterPriv);
+      localStorage.setItem(`${keyPrefix}_active_index`, '0');
+      localStorage.setItem(`${keyPrefix}_max_index`, '0');
     }
 
-    const savedPriv = localStorage.getItem(`${keyPrefix}_bip110_privkey`);
-    const savedPub = localStorage.getItem(`${keyPrefix}_bip110_pubkey`);
-    const savedAddress = localStorage.getItem(`${keyPrefix}_bip110_address`);
+    setMasterPrivateKey(masterPriv);
+    setActiveIndex(activeIdx);
+    setMaxIndex(maxIdx);
 
-    if (savedPriv && savedPub && savedAddress) {
-      setPrivateKey(savedPriv);
-      setPublicKey(savedPub);
-      setSplitAddress(savedAddress);
+    // Derive active states for this activeIndex
+    const activeKeys = deriveKeysForIndex(masterPriv, activeIdx, net);
+    setPrivateKey(activeKeys.privateKey);
+    setPublicKey(activeKeys.publicKey);
+    setSplitAddress(activeKeys.splitAddress);
+    setOwnAddress(activeKeys.ownAddress);
 
-      // Compute ownAddress
-      const net = getNetwork();
-      const ownPayment = bitcoin.payments.p2tr({
-        internalPubkey: PureBitcoinSwap.getXOnlyPubKey(Buffer.from(savedPub, 'hex')),
-        network: net
-      });
-      setOwnAddress(ownPayment.address!);
-
-      // Migrate existing keys to history if history is empty
-      if (historyList.length === 0) {
-        const initialWallet: WalletKeys = {
-          privateKey: savedPriv,
-          publicKey: savedPub,
-          splitAddress: savedAddress,
-          ownAddress: ownPayment.address!,
-          createdAt: Date.now()
-        };
-        const updatedHistory = [initialWallet];
-        setWalletHistory(updatedHistory);
-        localStorage.setItem(`${keyPrefix}_p2tr_history`, JSON.stringify(updatedHistory));
-      }
-    } else {
-      generateNewWallet();
-    }
     fetchNodeInfo();
     fetchOffers();
   }, [networkMode]);
@@ -569,53 +591,28 @@ export default function App() {
     setLoadingKeys(true);
     try {
       const net = getNetwork();
-      const pair = PureBitcoinSwap.generateKeyPair();
-      const pubKeyBuffer = Buffer.from(pair.publicKey);
-      const splitPayment = PureBitcoinSwap.createSplitPayment(pubKeyBuffer, net);
-      const ownPayment = bitcoin.payments.p2tr({
-        internalPubkey: PureBitcoinSwap.getXOnlyPubKey(pubKeyBuffer),
-        network: net
-      });
-
-      const privHex = Buffer.from(pair.privateKey!).toString('hex');
-      const pubHex = pubKeyBuffer.toString('hex');
-      const addrStr = splitPayment.payment.address!;
-      const ownAddrStr = ownPayment.address!;
-
-      setPrivateKey(privHex);
-      setPublicKey(pubHex);
-      setSplitAddress(addrStr);
-      setOwnAddress(ownAddrStr);
-
       const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
-      localStorage.setItem(`${keyPrefix}_bip110_privkey`, privHex);
-      localStorage.setItem(`${keyPrefix}_bip110_pubkey`, pubHex);
-      localStorage.setItem(`${keyPrefix}_bip110_address`, addrStr);
 
-      // Save to Address History list in localStorage
-      const newWallet: WalletKeys = {
-        privateKey: privHex,
-        publicKey: pubHex,
-        splitAddress: addrStr,
-        ownAddress: ownAddrStr,
-        createdAt: Date.now()
-      };
+      // Increment maxIndex to derive the next address deterministically!
+      const newMaxIndex = maxIndex + 1;
       
-      const savedHistoryStr = localStorage.getItem(`${keyPrefix}_p2tr_history`);
-      let historyList: WalletKeys[] = [];
-      if (savedHistoryStr) {
-        try {
-          historyList = JSON.parse(savedHistoryStr);
-        } catch {}
-      }
+      const activeKeys = deriveKeysForIndex(masterPrivateKey, newMaxIndex, net);
+
+      setPrivateKey(activeKeys.privateKey);
+      setPublicKey(activeKeys.publicKey);
+      setSplitAddress(activeKeys.splitAddress);
+      setOwnAddress(activeKeys.ownAddress);
+      setActiveIndex(newMaxIndex);
+      setMaxIndex(newMaxIndex);
+
+      localStorage.setItem(`${keyPrefix}_active_index`, String(newMaxIndex));
+      localStorage.setItem(`${keyPrefix}_max_index`, String(newMaxIndex));
+
+      localStorage.setItem(`${keyPrefix}_bip110_privkey`, activeKeys.privateKey);
+      localStorage.setItem(`${keyPrefix}_bip110_pubkey`, activeKeys.publicKey);
+      localStorage.setItem(`${keyPrefix}_bip110_address`, activeKeys.splitAddress);
       
-      if (!historyList.some(w => w.publicKey === pubHex)) {
-        const updatedHistory = [...historyList, newWallet];
-        setWalletHistory(updatedHistory);
-        localStorage.setItem(`${keyPrefix}_p2tr_history`, JSON.stringify(updatedHistory));
-      }
-      
-      showToast(`Generated fresh ${networkMode} P2TR addresses entirely on the client.`, 'success');
+      showToast(`Derived and switched to new P2TR Address #${newMaxIndex + 1} entirely from your master key.`, 'success');
     } catch (err: any) {
       showToast('Error generating keys: ' + err.message, 'error');
     } finally {
@@ -625,27 +622,25 @@ export default function App() {
 
   const loadWalletFromHistory = (index: number) => {
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
-    const savedHistoryStr = localStorage.getItem(`${keyPrefix}_p2tr_history`);
-    if (!savedHistoryStr) return;
+    const net = getNetwork();
     
-    try {
-      const historyList: WalletKeys[] = JSON.parse(savedHistoryStr);
-      if (index < 0 || index >= historyList.length) return;
-      const item = historyList[index];
-      
-      setPrivateKey(item.privateKey);
-      setPublicKey(item.publicKey);
-      setSplitAddress(item.splitAddress);
-      setOwnAddress(item.ownAddress);
+    if (index < 0 || index > maxIndex) return;
 
-      localStorage.setItem(`${keyPrefix}_bip110_privkey`, item.privateKey);
-      localStorage.setItem(`${keyPrefix}_bip110_pubkey`, item.publicKey);
-      localStorage.setItem(`${keyPrefix}_bip110_address`, item.splitAddress);
+    const activeKeys = deriveKeysForIndex(masterPrivateKey, index, net);
 
-      showToast(`Switched active P2TR address to Address #${index + 1}`, 'success');
-    } catch (e) {
-      console.error(e);
-    }
+    setPrivateKey(activeKeys.privateKey);
+    setPublicKey(activeKeys.publicKey);
+    setSplitAddress(activeKeys.splitAddress);
+    setOwnAddress(activeKeys.ownAddress);
+    setActiveIndex(index);
+
+    localStorage.setItem(`${keyPrefix}_active_index`, String(index));
+
+    localStorage.setItem(`${keyPrefix}_bip110_privkey`, activeKeys.privateKey);
+    localStorage.setItem(`${keyPrefix}_bip110_pubkey`, activeKeys.publicKey);
+    localStorage.setItem(`${keyPrefix}_bip110_address`, activeKeys.splitAddress);
+
+    showToast(`Switched active P2TR address to Address #${index + 1}`, 'success');
   };
 
   const fetchNodeInfo = async () => {
@@ -668,35 +663,60 @@ export default function App() {
   };
 
   const fetchBalances = async () => {
-    if (!splitAddress || !ownAddress) return;
+    if (!masterPrivateKey) return;
     try {
-      // 1. Fetch Contract UTXOs (Unsplit)
-      const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: splitAddress, chain: 'main', networkMode });
-      setMainUtxos(resMain.data.utxos);
-      const totalMain = resMain.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
+      const net = getNetwork();
+      let aggregatedMainUtxos: any[] = [];
+      let aggregatedBip110Utxos: any[] = [];
+      let aggregatedOwnMainUtxos: any[] = [];
+      let aggregatedOwnBip110Utxos: any[] = [];
+
+      // Query unspents for ALL derived addresses from index 0 to maxIndex
+      for (let i = 0; i <= maxIndex; i++) {
+        const childKeys = deriveKeysForIndex(masterPrivateKey, i, net);
+        
+        // 1. Fetch Contract UTXOs (Unsplit)
+        const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'main', networkMode });
+        const mainWithIndex = resMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
+        aggregatedMainUtxos.push(...mainWithIndex);
+
+        const resBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'bip110', networkMode });
+        const bip110WithIndex = resBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
+        aggregatedBip110Utxos.push(...bip110WithIndex);
+
+        // 2. Fetch Own Keypath Address UTXOs (Already split)
+        const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'main', networkMode });
+        const ownMainWithIndex = resOwnMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
+        aggregatedOwnMainUtxos.push(...ownMainWithIndex);
+
+        const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'bip110', networkMode });
+        const ownBip110WithIndex = resOwnBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
+        aggregatedOwnBip110Utxos.push(...ownBip110WithIndex);
+      }
+
+      setMainUtxos(aggregatedMainUtxos);
+      setBip110Utxos(aggregatedBip110Utxos);
+      setOwnMainUtxos(aggregatedOwnMainUtxos);
+      setOwnBip110Utxos(aggregatedOwnBip110Utxos);
+
+      // Sum balances
+      const totalMain = aggregatedMainUtxos.reduce((sum, u) => sum + u.amount, 0);
       setMainBalance(totalMain);
 
-      const resBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: splitAddress, chain: 'bip110', networkMode });
-      setBip110Utxos(resBip110.data.utxos);
-      const totalBip110 = resBip110.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
+      const totalBip110 = aggregatedBip110Utxos.reduce((sum, u) => sum + u.amount, 0);
       setBip110Balance(totalBip110);
 
-      // 2. Fetch Own Keypath Address UTXOs (Already split)
-      const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: ownAddress, chain: 'main', networkMode });
-      setOwnMainUtxos(resOwnMain.data.utxos);
-      const totalOwnMain = resOwnMain.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
+      const totalOwnMain = aggregatedOwnMainUtxos.reduce((sum, u) => sum + u.amount, 0);
       setOwnMainBalance(totalOwnMain);
 
-      const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: ownAddress, chain: 'bip110', networkMode });
-      setOwnBip110Utxos(resOwnBip110.data.utxos);
-      const totalOwnBip110 = resOwnBip110.data.utxos.reduce((sum: number, u: UTXO) => sum + u.amount, 0);
+      const totalOwnBip110 = aggregatedOwnBip110Utxos.reduce((sum, u) => sum + u.amount, 0);
       setOwnBip110Balance(totalOwnBip110);
 
       if (networkMode === 'regtest') {
         fetchNodeInfo();
       }
     } catch (err: any) {
-      console.error(err);
+      console.error("Error fetching multi-address balances:", err);
     }
   };
 
@@ -743,7 +763,9 @@ export default function App() {
     setBilateralSplitResult(null);
 
     const net = getNetwork();
-    const ownerKeyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+    const utxoIndex = (selectedUtxoToSplit as any).index !== undefined ? (selectedUtxoToSplit as any).index : activeIndex;
+    const utxoKeys = deriveKeysForIndex(masterPrivateKey, utxoIndex, net);
+    const ownerKeyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
     const pubKey = Buffer.from(ownerKeyPair.publicKey);
     const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
 
@@ -764,7 +786,7 @@ export default function App() {
         selectedUtxoToSplit.vout,
         inputSats,
         outputSats,
-        ownAddress,
+        utxoKeys.ownAddress, // Split goes to that child's own address!
         splitPayment.payment,
         splitPayment.script,
         net
@@ -951,7 +973,8 @@ export default function App() {
         if (!utxo) throw new Error(`No split UTXO found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! Split your coins first.`);
 
         // 3. Build & sign funding transaction locally!
-        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+        const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
+        const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
         const pubKey = Buffer.from(keyPair.publicKey);
 
         let splitDestPayment: bitcoin.payments.Payment;
@@ -1078,7 +1101,8 @@ export default function App() {
         if (!utxo) throw new Error(`No split UTXO found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! Split your coins first.`);
 
         // 3. Build & sign funding transaction locally!
-        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+        const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
+        const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
         const splitDestPubKey = Buffer.from(keyPair.publicKey);
         const splitDestPayment = bitcoin.payments.p2tr({
           internalPubkey: PureBitcoinSwap.getXOnlyPubKey(splitDestPubKey),
@@ -1174,7 +1198,7 @@ export default function App() {
         if (!savedPreimage) throw new Error("Cryptographic preimage not found in secure local storage.");
 
         // Build and sign claim transaction locally!
-        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+        const keyPair = getKeyPairForPubKey(selectedOffer.initiatorPubKey, net);
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
@@ -1258,7 +1282,7 @@ export default function App() {
         if (!utxo) throw new Error(`Could not find funded UTXO on ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC address.`);
 
         // Build and sign claim transaction locally!
-        const keyPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network: net });
+        const keyPair = getKeyPairForPubKey(Buffer.from(firstHtlcRecipient).toString('hex'), net);
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
@@ -1525,19 +1549,23 @@ export default function App() {
                     Generate New P2TR Address
                   </button>
 
-                  {walletHistory.length > 1 && (
+                  {maxIndex > 0 && (
                     <div className="mt-2 pt-4 border-t border-slate-800/80">
                       <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Switch Active P2TR Address</label>
                       <select
-                        value={walletHistory.findIndex(w => w.publicKey === publicKey)}
+                        value={activeIndex}
                         onChange={(e) => loadWalletFromHistory(Number(e.target.value))}
                         className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 font-mono"
                       >
-                        {walletHistory.map((w, index) => (
-                          <option key={w.publicKey} value={index}>
-                            Address #{index + 1} ({w.splitAddress.substring(0, 10)}...{w.splitAddress.substring(w.splitAddress.length - 8)})
-                          </option>
-                        ))}
+                        {Array.from({ length: maxIndex + 1 }).map((_, index) => {
+                          const net = getNetwork();
+                          const childKeys = deriveKeysForIndex(masterPrivateKey, index, net);
+                          return (
+                            <option key={index} value={index}>
+                              Address #{index + 1} ({childKeys.splitAddress.substring(0, 10)}...{childKeys.splitAddress.substring(childKeys.splitAddress.length - 8)})
+                            </option>
+                          );
+                        })}
                       </select>
                       <span className="text-[10px] text-slate-500 block mt-1.5 leading-normal">
                         Select any previously generated address from history. Its unspent balances, claims, and history will load instantly!
