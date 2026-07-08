@@ -1244,21 +1244,21 @@ export default function App() {
 
       {/* Header */}
       <header className="border-b border-slate-800/85 bg-slate-900/40 backdrop-blur-md sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-0 sm:h-16 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="bg-gradient-to-tr from-sky-500 to-indigo-500 p-2 rounded-xl shadow-lg shadow-sky-500/10">
               <Layers className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="font-bold text-lg leading-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
+              <h1 className="font-bold text-base sm:text-lg leading-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
                 BIP110 Split & Swap Portal
               </h1>
-              <p className="text-xs text-slate-400">Atomic Swaps Across Consensus Hard Forks</p>
+              <p className="text-[10px] sm:text-xs text-slate-400">Atomic Swaps Across Consensus Hard Forks</p>
             </div>
           </div>
 
           {/* Network Toggle Button and Stats */}
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-6">
             {!isNetworkLocked ? (
               <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-850">
                 <button
@@ -1301,32 +1301,32 @@ export default function App() {
             )}
 
             {networkMode === 'regtest' ? (
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-3 sm:gap-4">
                 <div className="flex items-center gap-2">
                   <div className="text-right">
-                    <span className="text-xs text-slate-400 block font-medium">Core Regtest</span>
-                    <span className="text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded-md">
+                    <span className="text-[10px] sm:text-xs text-slate-400 block font-medium">Core Regtest</span>
+                    <span className="text-[10px] sm:text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded-md">
                       Block #{nodeInfo.mainHeight}
                     </span>
                   </div>
                   <button
                     onClick={() => mineBlocks('main', 1)}
-                    className="px-2 py-1 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-900/40 hover:border-emerald-500 rounded-md transition-all self-end mb-0.5"
+                    className="px-2 py-1 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-900/40 hover:border-emerald-500 rounded-md transition-all h-fit self-end mb-0.5"
                     title="Mine 1 Block on Bitcoin Core Regtest"
                   >
                     +1 Block
                   </button>
                 </div>
-                <div className="flex items-center gap-2 border-l border-slate-800 pl-4">
+                <div className="flex items-center gap-2 border-l border-slate-800 pl-3 sm:pl-4">
                   <div className="text-right">
-                    <span className="text-xs text-slate-400 block font-medium">Knots Regtest</span>
-                    <span className="text-xs font-semibold text-sky-400 bg-sky-950/40 border border-sky-900/60 px-2 py-0.5 rounded-md">
+                    <span className="text-[10px] sm:text-xs text-slate-400 block font-medium">Knots Regtest</span>
+                    <span className="text-[10px] sm:text-xs font-semibold text-sky-400 bg-sky-950/40 border border-sky-900/60 px-2 py-0.5 rounded-md">
                       Block #{nodeInfo.bip110Height}
                     </span>
                   </div>
                   <button
                     onClick={() => mineBlocks('bip110', 1)}
-                    className="px-2 py-1 text-[10px] font-bold text-sky-400 hover:text-sky-300 bg-sky-950/30 hover:bg-sky-900/40 border border-sky-900/40 hover:border-sky-500 rounded-md transition-all self-end mb-0.5"
+                    className="px-2 py-1 text-[10px] font-bold text-sky-400 hover:text-sky-300 bg-sky-950/30 hover:bg-sky-900/40 border border-sky-900/40 hover:border-sky-500 rounded-md transition-all h-fit self-end mb-0.5"
                     title="Mine 1 Block on BIP110 Knots Regtest"
                   >
                     +1 Block
@@ -1351,8 +1351,8 @@ export default function App() {
       </header>
 
       {/* Navigation tabs */}
-      <div className="border-b border-slate-900 bg-slate-950/60 sticky top-16 z-30 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-6 flex gap-1">
+      <div className="border-b border-slate-900 bg-slate-950/60 sticky top-[116px] sm:top-16 z-30 backdrop-blur-md overflow-x-auto scrollbar-none whitespace-nowrap">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1 min-w-max sm:min-w-0">
           {[
                     { id: 'wallet', label: '1. Unified Wallet', icon: Wallet },
                     { id: 'splitter', label: '2. Bilateral Splitter', icon: Coins },
@@ -1365,7 +1365,7 @@ export default function App() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`py-4 px-6 font-medium text-sm flex items-center gap-2 border-b-2 transition-all ${
+                className={`py-4 px-6 font-medium text-sm flex items-center gap-2 border-b-2 transition-all shrink-0 ${
                   activeTab === tab.id 
                     ? 'border-indigo-500 text-indigo-400' 
                     : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -1380,7 +1380,7 @@ export default function App() {
       </div>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl mx-auto px-6 py-8 w-full">
+      <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-8 w-full">
         
         {/* TAB 1: WALLET / DEPOSIT */}
         {activeTab === 'wallet' && (
@@ -1470,19 +1470,19 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="mt-6 pt-4 border-t border-slate-800 flex gap-4">
+                <div className="mt-6 pt-4 border-t border-slate-800 flex flex-col sm:flex-row gap-4">
                   <div className="flex-1">
                     <span className="text-xs text-slate-400 block mb-1">Main-Chain Balance</span>
-                    <span className="text-xl font-bold text-emerald-400">
+                    <span className="text-lg sm:text-xl font-bold text-emerald-400">
                       {((mainBalance + ownMainBalance) / 100000000).toFixed(4)} {networkMode === 'mainnet' ? 'BTC' : 'rBTC'}
                     </span>
                     <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
                       {(mainBalance / 100000000).toFixed(4)} Unsplit + {(ownMainBalance / 100000000).toFixed(4)} Split
                     </span>
                   </div>
-                  <div className="flex-1 border-l border-slate-800 pl-4">
+                  <div className="flex-1 border-t sm:border-t-0 sm:border-l border-slate-800 pt-4 sm:pt-0 sm:pl-4">
                     <span className="text-xs text-slate-400 block mb-1">BIP110 Balance</span>
-                    <span className="text-xl font-bold text-sky-400">
+                    <span className="text-lg sm:text-xl font-bold text-sky-400">
                       {((bip110Balance + ownBip110Balance) / 100000000).toFixed(4)} B110
                     </span>
                     <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
@@ -2288,7 +2288,7 @@ export default function App() {
                     </p>
                   </div>
 
-                  <div className="flex gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full sm:w-auto">
                     <div className="bg-slate-950 border border-slate-850 px-4 py-2.5 rounded-xl text-center">
                       <span className="text-[10px] text-slate-500 uppercase block font-semibold">Sell Volume</span>
                       <span className="text-sm font-bold text-sky-400">{(selectedOffer.initiatorB110Amount / 100000000).toFixed(4)} B110</span>
