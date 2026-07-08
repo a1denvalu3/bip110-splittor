@@ -69,7 +69,23 @@ interface Offer {
 export default function App() {
   // Navigation & Network Mode
   const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard'>('wallet');
-  const [networkMode, setNetworkMode] = useState<'mainnet' | 'regtest'>('regtest');
+  
+  // Get initial networkMode from URL query params or environment variables immediately
+  const getInitialNetworkMode = (): 'mainnet' | 'regtest' => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlNetwork = urlParams.get('network');
+    if (urlNetwork === 'mainnet' || urlNetwork === 'regtest') {
+      return urlNetwork;
+    }
+    const envNetwork = import.meta.env.VITE_NETWORK_MODE;
+    if (envNetwork === 'mainnet' || envNetwork === 'regtest') {
+      return envNetwork;
+    }
+    return 'regtest'; // Default fallback
+  };
+
+  const [networkMode, setNetworkMode] = useState<'mainnet' | 'regtest'>(getInitialNetworkMode());
+  const [isNetworkLocked, setIsNetworkLocked] = useState<boolean>(false);
 
   // Wallet State
   const [privateKey, setPrivateKey] = useState<string>('');
@@ -435,6 +451,22 @@ export default function App() {
       showToast(`Refund failed: ${err.message}`, "error");
     }
   };
+
+  // Synchronize networkMode with backend config on mount
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/config`);
+        if (res.data && (res.data.networkMode === 'mainnet' || res.data.networkMode === 'regtest')) {
+          setNetworkMode(res.data.networkMode);
+          setIsNetworkLocked(true);
+        }
+      } catch (err) {
+        console.warn("Backend /api/config unavailable, using default network mode:", err);
+      }
+    };
+    fetchConfig();
+  }, []);
 
   // Load saved keys from LocalStorage on mount or networkMode change
   useEffect(() => {
@@ -1204,30 +1236,46 @@ export default function App() {
 
           {/* Network Toggle Button and Stats */}
           <div className="flex items-center gap-6">
-            <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-850">
-              <button
-                onClick={() => setNetworkMode('regtest')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                  networkMode === 'regtest' 
-                    ? 'bg-slate-900 text-indigo-400 shadow-sm border border-slate-800' 
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Flame className="w-3.5 h-3.5" />
-                Simulation (Regtest)
-              </button>
-              <button
-                onClick={() => setNetworkMode('mainnet')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                  networkMode === 'mainnet' 
-                    ? 'bg-amber-500/10 text-amber-400 shadow-sm border border-amber-500/20' 
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Globe className="w-3.5 h-3.5" />
-                Production (Mainnet)
-              </button>
-            </div>
+            {!isNetworkLocked ? (
+              <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-850">
+                <button
+                  onClick={() => setNetworkMode('regtest')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                    networkMode === 'regtest' 
+                      ? 'bg-slate-900 text-indigo-400 shadow-sm border border-slate-800' 
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Flame className="w-3.5 h-3.5" />
+                  Simulation (Regtest)
+                </button>
+                <button
+                  onClick={() => setNetworkMode('mainnet')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                    networkMode === 'mainnet' 
+                      ? 'bg-amber-500/10 text-amber-400 shadow-sm border border-amber-500/20' 
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  Production (Mainnet)
+                </button>
+              </div>
+            ) : (
+              <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-850">
+                {networkMode === 'regtest' ? (
+                  <div className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 text-indigo-400 bg-slate-900/40 border border-slate-800">
+                    <Flame className="w-3.5 h-3.5 animate-pulse" />
+                    SIMULATION (REGTEST MODE)
+                  </div>
+                ) : (
+                  <div className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 text-amber-400 bg-amber-500/10 border border-amber-500/20">
+                    <Lock className="w-3.5 h-3.5" />
+                    PRODUCTION (MAINNET MODE)
+                  </div>
+                )}
+              </div>
+            )}
 
             {networkMode === 'regtest' ? (
               <div className="flex items-center gap-4">

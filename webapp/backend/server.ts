@@ -8,6 +8,15 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
+// Parse command-line arguments and environment variables for network mode
+const args = process.argv.slice(2);
+const NETWORK_MODE: 'mainnet' | 'regtest' = 
+    (args.includes('--mainnet') || args.includes('--network=mainnet') || process.env.NETWORK_MODE === 'mainnet') 
+    ? 'mainnet' 
+    : 'regtest';
+
+console.log(`[BOOT] BIP110 Splittoooor Backend starting up in [${NETWORK_MODE.toUpperCase()}] mode.`);
+
 // In-memory Offer and TX Database
 interface Offer {
     id: string;
@@ -211,7 +220,7 @@ async function getTxConfirmations(txid: string | undefined, chain: 'main' | 'bip
 
 // 1. Get Marketplace Offers
 app.get('/api/offers', async (req: Request, res: Response) => {
-    const mode = (req.query.networkMode || 'regtest') as 'mainnet' | 'regtest';
+    const mode = NETWORK_MODE;
     const filteredOffers = Object.values(offers)
         .filter(o => o.networkMode === mode)
         .sort((a, b) => b.createdAt - a.createdAt);
@@ -249,7 +258,7 @@ app.get('/api/offers', async (req: Request, res: Response) => {
 
 // 2. Create a Marketplace Offer
 app.post('/api/offers', (req: Request, res: Response) => {
-    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, networkMode, backingTxid, backingVout, backingChain } = req.body;
+    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, backingTxid, backingVout, backingChain } = req.body;
 
     if (!initiatorPubKey || !initiatorB110Amount || !acceptorBtcAmount || !hashLock || !lockTime) {
         return res.status(400).json({ error: "Missing required parameters" });
@@ -264,7 +273,7 @@ app.post('/api/offers', (req: Request, res: Response) => {
         acceptorBtcAmount: Number(acceptorBtcAmount),
         hashLock,
         lockTime: Number(lockTime),
-        networkMode: networkMode || 'regtest',
+        networkMode: NETWORK_MODE,
         createdAt: Date.now(),
         backingTxid,
         backingVout: backingVout !== undefined ? Number(backingVout) : undefined,
@@ -320,11 +329,11 @@ app.post('/api/offers/:id/update', (req: Request, res: Response) => {
 
 // 5. Wallet Balance and UTXOs tracking (supports Mempool.space for Mainnet)
 app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
-    const { address, chain, networkMode } = req.body; 
+    const { address, chain } = req.body; 
     if (!address || !chain) {
         return res.status(400).json({ error: "Missing address or chain" });
     }
-    const mode = (networkMode || 'regtest') as 'mainnet' | 'regtest';
+    const mode = NETWORK_MODE;
 
     if (mode === 'mainnet') {
         // Fetch from Mempool.space Mainnet API
@@ -377,6 +386,9 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
 
 // 6. Regtest Faucet / Deposit Simulator
 app.post('/api/regtest/faucet', async (req: Request, res: Response) => {
+    if (NETWORK_MODE !== 'regtest') {
+        return res.status(403).json({ error: "Regtest endpoints are disabled in Production Mainnet mode." });
+    }
     const { address, amountSats, chain } = req.body;
     if (!address || !amountSats || !chain) {
         return res.status(400).json({ error: "Missing address, amountSats, or chain" });
@@ -402,6 +414,9 @@ app.post('/api/regtest/faucet', async (req: Request, res: Response) => {
 
 // 7. Regtest Block Miner
 app.post('/api/regtest/mine', async (req: Request, res: Response) => {
+    if (NETWORK_MODE !== 'regtest') {
+        return res.status(403).json({ error: "Regtest endpoints are disabled in Production Mainnet mode." });
+    }
     const { chain, blocks } = req.body;
     const minerRpc = chain === 'main' ? mainMinerRpc : bip110MinerRpc;
     const numBlocks = Number(blocks) || 1;
@@ -419,11 +434,11 @@ app.post('/api/regtest/mine', async (req: Request, res: Response) => {
 
 // 8. Broadcast Signed Raw Transaction (supports Mempool.space in Production)
 app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
-    const { hex, chain, networkMode, isSplit } = req.body;
+    const { hex, chain, isSplit } = req.body;
     if (!hex || !chain) {
         return res.status(400).json({ error: "Missing raw transaction hex or chain parameter" });
     }
-    const mode = (networkMode || 'regtest') as 'mainnet' | 'regtest';
+    const mode = NETWORK_MODE;
 
     if (mode === 'mainnet') {
         try {
@@ -451,6 +466,9 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 
 // 9. Node Chain Height Info (Regtest only)
 app.get('/api/node/info', async (req: Request, res: Response) => {
+    if (NETWORK_MODE !== 'regtest') {
+        return res.status(403).json({ error: "Regtest endpoints are disabled in Production Mainnet mode." });
+    }
     try {
         const mainHeight = await mainMinerRpc.call('getblockcount');
         const bip110Height = await bip110MinerRpc.call('getblockcount');
@@ -467,8 +485,19 @@ app.get('/api/node/info', async (req: Request, res: Response) => {
     }
 });
 
+// 10. System Configuration Endpoint
+app.get('/api/config', (req: Request, res: Response) => {
+    res.json({
+        networkMode: NETWORK_MODE
+    });
+});
+
 // Start the Express backend
 app.listen(PORT, async () => {
     console.log(`Server listening on http://localhost:${PORT}`);
-    await initNodeWallets();
+    if (NETWORK_MODE === 'regtest') {
+        await initNodeWallets();
+    } else {
+        console.log("[BOOT] Production Mainnet mode: skipping Regtest wallet initialization.");
+    }
 });
