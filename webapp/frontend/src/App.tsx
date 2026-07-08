@@ -1242,9 +1242,11 @@ export default function App() {
         </div>
       )}
 
-      {/* Header */}
-      <header className="border-b border-slate-800/85 bg-slate-900/40 backdrop-blur-md sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 sm:py-0 sm:h-16 flex flex-col sm:flex-row items-center justify-between gap-3">
+      {/* Sticky Top Navigation Bar */}
+      <div className="sticky top-0 z-40 w-full bg-slate-950/80 backdrop-blur-md border-b border-slate-900">
+        {/* Header */}
+        <header className="border-b border-slate-800/85 bg-slate-900/40 py-3 md:py-0 md:h-16 flex items-center">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 w-full flex flex-col md:flex-row md:items-center justify-between gap-3 md:gap-6">
           <div className="flex items-center gap-3">
             <div className="bg-gradient-to-tr from-sky-500 to-indigo-500 p-2 rounded-xl shadow-lg shadow-sky-500/10">
               <Layers className="w-6 h-6 text-white" />
@@ -1258,7 +1260,7 @@ export default function App() {
           </div>
 
           {/* Network Toggle Button and Stats */}
-          <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-6">
+          <div className="flex flex-wrap items-center justify-start md:justify-end gap-3 sm:gap-6">
             {!isNetworkLocked ? (
               <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-850">
                 <button
@@ -1302,31 +1304,31 @@ export default function App() {
 
             {networkMode === 'regtest' ? (
               <div className="flex items-center gap-3 sm:gap-4">
-                <div className="flex items-center gap-2">
-                  <div className="text-right">
-                    <span className="text-[10px] sm:text-xs text-slate-400 block font-medium">Core Regtest</span>
-                    <span className="text-[10px] sm:text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded-md">
+                <div className="flex items-center gap-2.5">
+                  <div className="flex flex-col items-end leading-none">
+                    <span className="text-[10px] sm:text-xs text-slate-400 font-medium">Core Regtest</span>
+                    <span className="text-[10px] sm:text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2 py-0.5 rounded-md mt-1">
                       Block #{nodeInfo.mainHeight}
                     </span>
                   </div>
                   <button
                     onClick={() => mineBlocks('main', 1)}
-                    className="px-2 py-1 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-900/40 hover:border-emerald-500 rounded-md transition-all h-fit self-end mb-0.5"
+                    className="px-2 py-1 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-900/40 hover:border-emerald-500 rounded-md transition-all self-end"
                     title="Mine 1 Block on Bitcoin Core Regtest"
                   >
                     +1 Block
                   </button>
                 </div>
-                <div className="flex items-center gap-2 border-l border-slate-800 pl-3 sm:pl-4">
-                  <div className="text-right">
-                    <span className="text-[10px] sm:text-xs text-slate-400 block font-medium">Knots Regtest</span>
-                    <span className="text-[10px] sm:text-xs font-semibold text-sky-400 bg-sky-950/40 border border-sky-900/60 px-2 py-0.5 rounded-md">
+                <div className="flex items-center gap-2.5 border-l border-slate-800 pl-3 sm:pl-4">
+                  <div className="flex flex-col items-end leading-none">
+                    <span className="text-[10px] sm:text-xs text-slate-400 font-medium">Knots Regtest</span>
+                    <span className="text-[10px] sm:text-xs font-semibold text-sky-400 bg-sky-950/40 border border-sky-900/60 px-2 py-0.5 rounded-md mt-1">
                       Block #{nodeInfo.bip110Height}
                     </span>
                   </div>
                   <button
                     onClick={() => mineBlocks('bip110', 1)}
-                    className="px-2 py-1 text-[10px] font-bold text-sky-400 hover:text-sky-300 bg-sky-950/30 hover:bg-sky-900/40 border border-sky-900/40 hover:border-sky-500 rounded-md transition-all h-fit self-end mb-0.5"
+                    className="px-2 py-1 text-[10px] font-bold text-sky-400 hover:text-sky-300 bg-sky-950/30 hover:bg-sky-900/40 border border-sky-900/40 hover:border-sky-500 rounded-md transition-all self-end"
                     title="Mine 1 Block on BIP110 Knots Regtest"
                   >
                     +1 Block
@@ -1351,14 +1353,14 @@ export default function App() {
       </header>
 
       {/* Navigation tabs */}
-      <div className="border-b border-slate-900 bg-slate-950/60 sticky top-[116px] sm:top-16 z-30 backdrop-blur-md overflow-x-auto scrollbar-none whitespace-nowrap">
+      <div className="bg-slate-950/60 overflow-x-auto scrollbar-none whitespace-nowrap">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1 min-w-max sm:min-w-0">
           {[
-                    { id: 'wallet', label: '1. Unified Wallet', icon: Wallet },
-                    { id: 'splitter', label: '2. Bilateral Splitter', icon: Coins },
-                    { id: 'marketplace', label: '3. Marketplace Lobby', icon: TrendingUp },
-                    { id: 'my-offers', label: '4. My Swaps & Offers', icon: User },
-                    { id: 'wizard', label: '5. Swap Wizard', icon: Award }
+            { id: 'wallet', label: '1. Unified Wallet', icon: Wallet },
+            { id: 'splitter', label: '2. Bilateral Splitter', icon: Coins },
+            { id: 'marketplace', label: '3. Marketplace Lobby', icon: TrendingUp },
+            { id: 'my-offers', label: '4. My Swaps & Offers', icon: User },
+            { id: 'wizard', label: '5. Swap Wizard', icon: Award }
           ].map(tab => {
             const Icon = tab.icon;
             return (
@@ -1378,6 +1380,7 @@ export default function App() {
           })}
         </div>
       </div>
+    </div>
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-8 w-full">
@@ -1458,13 +1461,15 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="space-y-2 text-xs text-slate-400">
-                    <div className="flex justify-between border-b border-slate-900 pb-1.5">
-                      <span>Internal Pubkey (X-Only):</span>
-                      <span className="font-mono text-slate-200">{publicKey ? publicKey.substring(2) : 'N/A'}</span>
+                  <div className="space-y-2.5 text-xs text-slate-400">
+                    <div className="flex flex-col gap-1 xs:flex-row xs:justify-between border-b border-slate-900 pb-2">
+                      <span className="shrink-0 font-medium">Internal Pubkey (X-Only):</span>
+                      <span className="font-mono text-slate-200 truncate max-w-full sm:max-w-[200px]" title={publicKey ? publicKey.substring(2) : 'N/A'}>
+                        {publicKey ? publicKey.substring(2) : 'N/A'}
+                      </span>
                     </div>
                     <div className="flex justify-between">
-                      <span>Address Prefix:</span>
+                      <span className="font-medium">Address Prefix:</span>
                       <span className="font-semibold text-amber-500">{networkMode === 'mainnet' ? 'bc1p (Bitcoin Mainnet)' : 'bcrt1p (Regtest)'}</span>
                     </div>
                   </div>
