@@ -95,6 +95,15 @@ export default function App() {
   const [revealPrivKey, setRevealPrivKey] = useState<boolean>(false);
   const [loadingKeys, setLoadingKeys] = useState<boolean>(false);
 
+  interface WalletKeys {
+    privateKey: string;
+    publicKey: string;
+    splitAddress: string;
+    ownAddress: string;
+    createdAt: number;
+  }
+  const [walletHistory, setWalletHistory] = useState<WalletKeys[]>([]);
+
   // Balances of split contract address
   const [mainBalance, setMainBalance] = useState<number>(0);
   const [bip110Balance, setBip110Balance] = useState<number>(0);
@@ -471,6 +480,19 @@ export default function App() {
   // Load saved keys from LocalStorage on mount or networkMode change
   useEffect(() => {
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
+    
+    // Load history
+    const savedHistoryStr = localStorage.getItem(`${keyPrefix}_p2tr_history`);
+    let historyList: WalletKeys[] = [];
+    if (savedHistoryStr) {
+      try {
+        historyList = JSON.parse(savedHistoryStr);
+        setWalletHistory(historyList);
+      } catch (e) {
+        console.error("Failed to parse wallet history:", e);
+      }
+    }
+
     const savedPriv = localStorage.getItem(`${keyPrefix}_bip110_privkey`);
     const savedPub = localStorage.getItem(`${keyPrefix}_bip110_pubkey`);
     const savedAddress = localStorage.getItem(`${keyPrefix}_bip110_address`);
@@ -487,6 +509,20 @@ export default function App() {
         network: net
       });
       setOwnAddress(ownPayment.address!);
+
+      // Migrate existing keys to history if history is empty
+      if (historyList.length === 0) {
+        const initialWallet: WalletKeys = {
+          privateKey: savedPriv,
+          publicKey: savedPub,
+          splitAddress: savedAddress,
+          ownAddress: ownPayment.address!,
+          createdAt: Date.now()
+        };
+        const updatedHistory = [initialWallet];
+        setWalletHistory(updatedHistory);
+        localStorage.setItem(`${keyPrefix}_p2tr_history`, JSON.stringify(updatedHistory));
+      }
     } else {
       generateNewWallet();
     }
@@ -555,12 +591,60 @@ export default function App() {
       localStorage.setItem(`${keyPrefix}_bip110_privkey`, privHex);
       localStorage.setItem(`${keyPrefix}_bip110_pubkey`, pubHex);
       localStorage.setItem(`${keyPrefix}_bip110_address`, addrStr);
+
+      // Save to Address History list in localStorage
+      const newWallet: WalletKeys = {
+        privateKey: privHex,
+        publicKey: pubHex,
+        splitAddress: addrStr,
+        ownAddress: ownAddrStr,
+        createdAt: Date.now()
+      };
       
-      showToast(`Generated fresh ${networkMode} keypair entirely on the client.`, 'success');
+      const savedHistoryStr = localStorage.getItem(`${keyPrefix}_p2tr_history`);
+      let historyList: WalletKeys[] = [];
+      if (savedHistoryStr) {
+        try {
+          historyList = JSON.parse(savedHistoryStr);
+        } catch {}
+      }
+      
+      if (!historyList.some(w => w.publicKey === pubHex)) {
+        const updatedHistory = [...historyList, newWallet];
+        setWalletHistory(updatedHistory);
+        localStorage.setItem(`${keyPrefix}_p2tr_history`, JSON.stringify(updatedHistory));
+      }
+      
+      showToast(`Generated fresh ${networkMode} P2TR addresses entirely on the client.`, 'success');
     } catch (err: any) {
       showToast('Error generating keys: ' + err.message, 'error');
     } finally {
       setLoadingKeys(false);
+    }
+  };
+
+  const loadWalletFromHistory = (index: number) => {
+    const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
+    const savedHistoryStr = localStorage.getItem(`${keyPrefix}_p2tr_history`);
+    if (!savedHistoryStr) return;
+    
+    try {
+      const historyList: WalletKeys[] = JSON.parse(savedHistoryStr);
+      if (index < 0 || index >= historyList.length) return;
+      const item = historyList[index];
+      
+      setPrivateKey(item.privateKey);
+      setPublicKey(item.publicKey);
+      setSplitAddress(item.splitAddress);
+      setOwnAddress(item.ownAddress);
+
+      localStorage.setItem(`${keyPrefix}_bip110_privkey`, item.privateKey);
+      localStorage.setItem(`${keyPrefix}_bip110_pubkey`, item.publicKey);
+      localStorage.setItem(`${keyPrefix}_bip110_address`, item.splitAddress);
+
+      showToast(`Switched active P2TR address to Address #${index + 1}`, 'success');
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -1432,14 +1516,34 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="mt-6 flex gap-3">
+                <div className="mt-6 flex flex-col gap-4">
                   <button
                     onClick={generateNewWallet}
                     disabled={loadingKeys}
-                    className="px-4 py-2 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white transition-all"
+                    className="w-full sm:w-auto px-4 py-2 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white transition-all self-start"
                   >
-                    Generate Fresh Keypair
+                    Generate New P2TR Address
                   </button>
+
+                  {walletHistory.length > 1 && (
+                    <div className="mt-2 pt-4 border-t border-slate-800/80">
+                      <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Switch Active P2TR Address</label>
+                      <select
+                        value={walletHistory.findIndex(w => w.publicKey === publicKey)}
+                        onChange={(e) => loadWalletFromHistory(Number(e.target.value))}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 font-mono"
+                      >
+                        {walletHistory.map((w, index) => (
+                          <option key={w.publicKey} value={index}>
+                            Address #{index + 1} ({w.splitAddress.substring(0, 10)}...{w.splitAddress.substring(w.splitAddress.length - 8)})
+                          </option>
+                        ))}
+                      </select>
+                      <span className="text-[10px] text-slate-500 block mt-1.5 leading-normal">
+                        Select any previously generated address from history. Its unspent balances, claims, and history will load instantly!
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
