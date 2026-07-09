@@ -50,6 +50,8 @@ interface UTXO {
   vout: number;
   amount: number; // satoshis
   confirmations: number;
+  index?: number;
+  address?: string;
 }
 
 interface Offer {
@@ -148,6 +150,12 @@ export default function App() {
   const [premiumPercent, setPremiumPercent] = useState<string>('0');
   const [publishing, setPublishing] = useState<boolean>(false);
   const [selectedBackingUtxoKey, setSelectedBackingUtxoKey] = useState<string>('');
+
+  // Withdraw State
+  const [withdrawDestAddress, setWithdrawDestAddress] = useState<string>('');
+  const [selectedWithdrawUtxoKey, setSelectedWithdrawUtxoKey] = useState<string>('');
+  const [withdrawAmountSats, setWithdrawAmountSats] = useState<string>('');
+  const [withdrawing, setWithdrawing] = useState<boolean>(false);
 
   // Toast notifications
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -820,6 +828,99 @@ export default function App() {
     setSelectedUtxoToSplit(null);
     await fetchBalances();
     setSplittingBilateral(false);
+  };
+
+  const executeWithdrawal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedWithdrawUtxoKey) {
+      showToast("Please select a UTXO to withdraw from.", "error");
+      return;
+    }
+    if (!withdrawDestAddress) {
+      showToast("Please enter a destination address.", "error");
+      return;
+    }
+
+    setWithdrawing(true);
+    try {
+      const [txid, voutStr] = selectedWithdrawUtxoKey.split('|');
+      const vout = Number(voutStr);
+
+      let utxo = mainUtxos.find(u => u.txid === txid && u.vout === vout);
+      let isSplitAddress = true;
+      let isMainChain = true;
+
+      if (!utxo) {
+        utxo = bip110Utxos.find(u => u.txid === txid && u.vout === vout);
+        isSplitAddress = true;
+        isMainChain = false;
+      }
+      if (!utxo) {
+        utxo = ownMainUtxos.find(u => u.txid === txid && u.vout === vout);
+        isSplitAddress = false;
+        isMainChain = true;
+      }
+      if (!utxo) {
+        utxo = ownBip110Utxos.find(u => u.txid === txid && u.vout === vout);
+        isSplitAddress = false;
+        isMainChain = false;
+      }
+
+      if (!utxo) {
+        throw new Error("Could not find the selected UTXO.");
+      }
+
+      const inputSats = BigInt(utxo.amount);
+      let withdrawSats = Number(withdrawAmountSats);
+      if (!withdrawSats || withdrawSats <= 0) {
+        // Default to withdraw max (minus 5000 sat standard fee)
+        withdrawSats = Number(inputSats) - 5000;
+      }
+
+      if (withdrawSats > Number(inputSats) - 5000) {
+        throw new Error(`Withdraw amount cannot exceed ${((Number(inputSats) - 5000) / 100000000).toFixed(4)} (input size minus fee).`);
+      }
+
+      const net = getNetwork();
+      const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
+      const ownerKeyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
+      const childKeys = deriveKeysForIndex(masterPrivateKey, utxoIndex, net);
+
+      showToast(`Signing withdrawal from Address #${utxoIndex + 1}...`, "info");
+
+      const tx = PureBitcoinSwap.buildWithdrawalTx(
+        ownerKeyPair,
+        utxo.txid,
+        utxo.vout,
+        inputSats,
+        BigInt(withdrawSats),
+        withdrawDestAddress,
+        isSplitAddress,
+        isMainChain,
+        isSplitAddress ? childKeys.ownAddress : undefined, // If spending split contract, leftover change goes to ownAddress
+        net
+      );
+
+      const targetChain = isMainChain ? 'main' : 'bip110';
+      const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
+        hex: tx.toHex(),
+        chain: targetChain,
+        networkMode
+      });
+
+      showToast(`Withdrawal successfully broadcasted on ${isMainChain ? 'Bitcoin Core' : 'BIP110-Chain'}! TxID: ${broadcastRes.data.txid}`, 'success');
+      
+      // Clear fields
+      setWithdrawDestAddress('');
+      setSelectedWithdrawUtxoKey('');
+      setWithdrawAmountSats('');
+      
+      await fetchBalances();
+    } catch (err: any) {
+      showToast('Withdrawal failed: ' + err.message, 'error');
+    } finally {
+      setWithdrawing(false);
+    }
   };
 
   const handleCreateOffer = async (e: React.FormEvent) => {
@@ -1842,6 +1943,136 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* Withdraw Funds Panel */}
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
+              <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
+                <ExternalLink className="w-5 h-5 text-indigo-400" />
+                Withdraw Unlocked Funds
+              </h3>
+              <p className="text-xs text-slate-400 mb-6">
+                You can withdraw any unlocked unspent output (UTXO) to an external Bitcoin/BIP110 address at any time.
+              </p>
+
+              <form onSubmit={executeWithdrawal} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">
+                      Select Source UTXO to withdraw from
+                    </label>
+                    <select
+                      value={selectedWithdrawUtxoKey}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        setSelectedWithdrawUtxoKey(key);
+                        if (key) {
+                          const [txid, voutStr] = key.split('|');
+                          const vout = Number(voutStr);
+                          const utxo = [...mainUtxos, ...bip110Utxos, ...ownMainUtxos, ...ownBip110Utxos]
+                            .find(u => u.txid === txid && u.vout === vout);
+                          if (utxo) {
+                            // Default to max withdraw (minus 5000 sat standard fee)
+                            const maxWithdraw = utxo.amount - 5000;
+                            setWithdrawAmountSats(String(maxWithdraw > 0 ? maxWithdraw : 0));
+                          }
+                        } else {
+                          setWithdrawAmountSats('');
+                        }
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+                    >
+                      <option value="">-- Choose a Source UTXO --</option>
+                      {/* Main-chain splitAddress outputs */}
+                      {mainUtxos.map(u => (
+                        <option key={`${u.txid}-${u.vout}-split-main`} value={`${u.txid}|${u.vout}`}>
+                          BTC [Contract Addr] ({(u.amount / 100000000).toFixed(4)} BTC | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
+                        </option>
+                      ))}
+                      {/* BIP110-chain splitAddress outputs */}
+                      {bip110Utxos.map(u => (
+                        <option key={`${u.txid}-${u.vout}-split-b110`} value={`${u.txid}|${u.vout}`}>
+                          B110 [Contract Addr] ({(u.amount / 100000000).toFixed(4)} B110 | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
+                        </option>
+                      ))}
+                      {/* Main-chain ownAddress outputs */}
+                      {ownMainUtxos.map(u => (
+                        <option key={`${u.txid}-${u.vout}-own-main`} value={`${u.txid}|${u.vout}`}>
+                          BTC [Own Split Addr] ({(u.amount / 100000000).toFixed(4)} BTC | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
+                        </option>
+                      ))}
+                      {/* BIP110-chain ownAddress outputs */}
+                      {ownBip110Utxos.map(u => (
+                        <option key={`${u.txid}-${u.vout}-own-b110`} value={`${u.txid}|${u.vout}`}>
+                          B110 [Own Split Addr] ({(u.amount / 100000000).toFixed(4)} B110 | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">
+                      External Destination Address
+                    </label>
+                    <input
+                      type="text"
+                      value={withdrawDestAddress}
+                      onChange={(e) => setWithdrawDestAddress(e.target.value)}
+                      placeholder="e.g. bcrt1p... or bc1p..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-end pt-2">
+                  <div>
+                    <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">
+                      Withdrawal Amount (Sats)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="10000"
+                        value={withdrawAmountSats}
+                        onChange={(e) => setWithdrawAmountSats(e.target.value)}
+                        placeholder="Withdrawal amount in Satoshis"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono pr-16"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedWithdrawUtxoKey) {
+                            const [txid, voutStr] = selectedWithdrawUtxoKey.split('|');
+                            const vout = Number(voutStr);
+                            const utxo = [...mainUtxos, ...bip110Utxos, ...ownMainUtxos, ...ownBip110Utxos]
+                              .find(u => u.txid === txid && u.vout === vout);
+                            if (utxo) {
+                              const maxWithdraw = utxo.amount - 5000;
+                              setWithdrawAmountSats(String(maxWithdraw > 0 ? maxWithdraw : 0));
+                            }
+                          }
+                        }}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-[10px] font-bold text-indigo-400 hover:text-indigo-300 bg-slate-900 border border-slate-800 rounded"
+                      >
+                        MAX
+                      </button>
+                    </div>
+                    <span className="text-[10px] text-slate-500 mt-1 block">
+                      Standard transaction fee of 5,000 satoshis will be deducted.
+                    </span>
+                  </div>
+
+                  <div>
+                    <button
+                      type="submit"
+                      disabled={withdrawing || !selectedWithdrawUtxoKey || !withdrawDestAddress}
+                      className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl py-2.5 shadow-lg shadow-indigo-600/10 transition-all"
+                    >
+                      {withdrawing ? 'Broadcasting Withdrawal...' : 'Execute Withdrawal'}
+                    </button>
+                  </div>
+                </div>
+              </form>
             </div>
           </div>
         )}

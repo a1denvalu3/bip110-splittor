@@ -404,6 +404,91 @@ export class PureBitcoinSwap {
     }
 
     /**
+     * Builds and signs a withdrawal transaction spending from either a split contract (P2TR splitAddress)
+     * or a standard own address (P2TR ownAddress) to an arbitrary external address.
+     */
+    static buildWithdrawalTx(
+        ownerKeyPair: ECPairInterface,
+        txid: string,
+        vout: number,
+        inputSats: bigint,
+        withdrawSats: bigint,
+        destAddress: string,
+        isSplitAddress: boolean,
+        isMainChain: boolean,
+        changeAddress?: string,
+        network: bitcoin.Network = bitcoin.networks.regtest
+    ): bitcoin.Transaction {
+        const tx = new bitcoin.Transaction();
+        tx.version = 2;
+        tx.addInput(Buffer.from(txid, 'hex').reverse(), vout);
+
+        const fee = BigInt(5000);
+        let finalWithdrawSats = withdrawSats;
+        let changeSats = inputSats - finalWithdrawSats - fee;
+
+        if (changeSats < 0n) {
+            // Adjust output amount to fit within input minus fee
+            finalWithdrawSats = inputSats - fee;
+            changeSats = 0n;
+        }
+
+        // 1. Add withdrawal output
+        tx.addOutput(bitcoin.address.toOutputScript(destAddress, network), finalWithdrawSats);
+
+        // 2. Add change output if leftover change exists and changeAddress is specified
+        if (changeSats > 0n && changeAddress) {
+            tx.addOutput(bitcoin.address.toOutputScript(changeAddress, network), changeSats);
+        }
+
+        const pubKey = Buffer.from(ownerKeyPair.publicKey);
+
+        if (isSplitAddress) {
+            // Need script tree for split contract
+            const splitPaymentInfo = this.createSplitPayment(pubKey, network);
+
+            if (isMainChain) {
+                // Main-Chain split spend uses the OP_IF Scriptpath
+                const leafHash = this.tapleafHash(splitPaymentInfo.script);
+                const sighash = tx.hashForWitnessV1(
+                    0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
+                );
+                const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
+                const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
+
+                const controlBlock = splitPaymentInfo.payment.witness![1];
+                tx.setWitness(0, [
+                    splitPaymentInfo.script,
+                    controlBlock
+                ]);
+            } else {
+                // BIP110 split spend uses Keypath (tweaked with Merkle root)
+                const sighash = tx.hashForWitnessV1(
+                    0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
+                );
+                const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, splitPaymentInfo.leafHash, network);
+                const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
+                tx.setWitness(0, [sig]);
+            }
+        } else {
+            // Simple P2TR Keypath spend from ownAddress
+            const ownPayment = bitcoin.payments.p2tr({
+                internalPubkey: this.getXOnlyPubKey(pubKey),
+                network
+            });
+
+            const sighash = tx.hashForWitnessV1(
+                0, [ownPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
+            );
+            const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
+            const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
+            tx.setWitness(0, [sig]);
+        }
+
+        return tx;
+    }
+
+    /**
      * Verifies that a given Taproot HTLC address matches the expected script leaves and parameters.
      */
     static verifyTaprootHtlcAddress(
