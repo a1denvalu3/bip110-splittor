@@ -495,14 +495,14 @@ app.post('/api/offers/:id/delete', async (req: Request, res: Response) => {
     }
 
     try {
-        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        const offer = await getOfferById(id);
         if (!offer) {
             return res.status(404).json({ error: "Offer not found" });
         }
 
-        // Deletion only permitted before funds are locked (OPEN or ACCEPTED status)
-        if (offer.status !== 'OPEN' && offer.status !== 'ACCEPTED') {
-            return res.status(400).json({ error: "Cannot delete offer after funds have been locked" });
+        // Deletion only permitted when the offer is in OPEN status
+        if (offer.status !== 'OPEN') {
+            return res.status(400).json({ error: "Cannot delete offer. Deletion is only permitted while the offer is OPEN." });
         }
 
         // Verify cryptographic signature from the same initiator author

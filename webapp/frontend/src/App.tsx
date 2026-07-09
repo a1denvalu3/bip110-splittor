@@ -3190,7 +3190,7 @@ export default function App() {
                           Open Swap Wizard
                         </button>
                         
-                        {(o.status === 'OPEN' || o.status === 'ACCEPTED') && (
+                        {o.status === 'OPEN' && (
                           <button
                             onClick={() => handleDeleteOffer(o)}
                             className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/40 text-rose-300 transition-all flex items-center justify-center gap-1"
