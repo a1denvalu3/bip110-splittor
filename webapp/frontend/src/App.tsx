@@ -27,7 +27,9 @@ import {
   Flame,
   UserCheck,
   User,
-  Check
+  Check,
+  Download,
+  Upload
 } from 'lucide-react';
 
 // Initialize Elliptic Curve library in the browser
@@ -105,6 +107,9 @@ export default function App() {
 
   // Polling History Ref for Change Detection Notifications
   const prevOffersRef = useRef<Offer[]>([]);
+
+  const [revealMasterPrivKey, setRevealMasterPrivKey] = useState<boolean>(false);
+  const [recoveryDownloaded, setRecoveryDownloaded] = useState<boolean>(false);
 
   // Active derived states (at activeIndex)
   const [privateKey, setPrivateKey] = useState<string>('');
@@ -785,6 +790,10 @@ export default function App() {
     setActiveIndex(activeIdx);
     setMaxIndex(maxIdx);
 
+    // Retrieve recovery downloaded status for this networkMode
+    const isDownloaded = localStorage.getItem(`${keyPrefix}_recovery_downloaded`) === 'true';
+    setRecoveryDownloaded(isDownloaded);
+
     // Derive active states for this activeIndex
     const activeKeys = deriveKeysForIndex(masterPriv, activeIdx, net);
     setPrivateKey(activeKeys.privateKey);
@@ -829,6 +838,97 @@ export default function App() {
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 5000);
+  };
+
+  const handleDownloadRecoveryFile = () => {
+    try {
+      const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
+      const recoveryData = {
+        app: 'bip110-splittoooor',
+        networkMode,
+        masterPrivateKey,
+        maxIndex,
+        backupDate: new Date().toISOString(),
+        instructions: "Upload this file to the BIP110 Splittoooor application to instantly restore your Master Private Key and derived addresses."
+      };
+
+      const jsonStr = JSON.stringify(recoveryData, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `bip110-splittoooor-recovery-${networkMode}-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      // Set downloaded state to true and save to local storage
+      localStorage.setItem(`${keyPrefix}_recovery_downloaded`, 'true');
+      setRecoveryDownloaded(true);
+
+      showToast('Recovery file downloaded successfully! Wallet splitting features unlocked.', 'success');
+    } catch (err: any) {
+      showToast('Error generating recovery file: ' + err.message, 'error');
+    }
+  };
+
+  const handleUploadRecoveryFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target?.result as string;
+        const data = JSON.parse(text);
+
+        if (data.app !== 'bip110-splittoooor' || !data.masterPrivateKey) {
+          showToast('Invalid recovery file format. Please upload a valid BIP110 Splittoooor recovery file.', 'error');
+          return;
+        }
+
+        const confirmed = window.confirm(
+          `Are you sure you want to restore this wallet?\n\nThis will overwrite your current Master Private Key (${masterPrivateKey.substring(0, 10)}...) and derived addresses with the ones from the backup.\n\nMake sure you have backed up any current keys first!`
+        );
+        if (!confirmed) return;
+
+        const net = getNetwork();
+        const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
+
+        // Update local state and localStorage
+        const masterPriv = data.masterPrivateKey;
+        const maxIdx = typeof data.maxIndex === 'number' ? data.maxIndex : 0;
+        const activeIdx = 0; // reset active index to first derived address
+
+        setMasterPrivateKey(masterPriv);
+        setActiveIndex(activeIdx);
+        setMaxIndex(maxIdx);
+
+        localStorage.setItem(`${keyPrefix}_master_privkey`, masterPriv);
+        localStorage.setItem(`${keyPrefix}_active_index`, String(activeIdx));
+        localStorage.setItem(`${keyPrefix}_max_index`, String(maxIdx));
+
+        // Mark recovery as downloaded since they uploaded their recovery backup
+        localStorage.setItem(`${keyPrefix}_recovery_downloaded`, 'true');
+        setRecoveryDownloaded(true);
+
+        // Derive active states
+        const activeKeys = deriveKeysForIndex(masterPriv, activeIdx, net);
+        setPrivateKey(activeKeys.privateKey);
+        setPublicKey(activeKeys.publicKey);
+        setSplitAddress(activeKeys.splitAddress);
+        setOwnAddress(activeKeys.ownAddress);
+
+        showToast('Wallet successfully restored from backup file! Switched to derived Address #1.', 'success');
+      } catch (err: any) {
+        showToast('Error parsing recovery file: ' + err.message, 'error');
+      }
+    };
+    reader.readAsText(file);
+    // Reset file input value
+    event.target.value = '';
   };
 
   const generateNewWallet = async () => {
@@ -994,6 +1094,10 @@ export default function App() {
   };
 
   const executeBilateralSplit = async () => {
+    if (!recoveryDownloaded) {
+      showToast('Safety lock: You must download your recovery backup file first!', 'error');
+      return;
+    }
     if (!selectedUtxoToSplit) {
       showToast('Please select an unsplit UTXO to split!', 'error');
       return;
@@ -1987,6 +2091,92 @@ export default function App() {
               </div>
             </div>
 
+            {/* HD Wallet Security, Backup & Recovery Card */}
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
+              <div>
+                <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-indigo-400" />
+                  HD Wallet Security, Backup & Restore
+                </h3>
+                <p className="text-xs text-slate-400">
+                  This application uses a Hierarchical Deterministic (HD) scheme. All your P2TR addresses, split contracts, and change keys are derived from a single Master Private Key. Keep it safe and backed up!
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Download Backup Section */}
+                <div className="bg-slate-950/60 border border-slate-850 p-5 rounded-xl flex flex-col justify-between space-y-4">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                      <Download className="w-4 h-4 text-emerald-400" />
+                      1. Backup Master Seed
+                    </h4>
+                    <p className="text-[11px] text-slate-500 leading-relaxed mb-4">
+                      Download a secure JSON backup file containing your Master Seed and account indexes. This is required to unlock coin-splitting and safe-refund features.
+                    </p>
+
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block uppercase tracking-wider mb-1">Master Private Key (Seed)</label>
+                      <div className="bg-slate-950 border border-slate-900 px-3 py-2 rounded-lg flex items-center justify-between font-mono text-xs text-slate-400">
+                        <span className="truncate mr-4">
+                          {masterPrivateKey 
+                            ? (revealMasterPrivKey ? masterPrivateKey : '••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••') 
+                            : 'No master key loaded'}
+                        </span>
+                        <div className="flex gap-2 shrink-0">
+                          <button onClick={() => setRevealMasterPrivKey(!revealMasterPrivKey)} className="text-slate-600 hover:text-slate-400">
+                            {revealMasterPrivKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                          </button>
+                          <button onClick={() => copyToClipboard(masterPrivateKey)} className="text-slate-600 hover:text-slate-400">
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleDownloadRecoveryFile}
+                    className="w-full sm:w-auto px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-emerald-600/10"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download Recovery Backup File
+                  </button>
+                </div>
+
+                {/* Upload Restore Section */}
+                <div className="bg-slate-950/60 border border-slate-850 p-5 rounded-xl flex flex-col justify-between space-y-4">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                      <Upload className="w-4 h-4 text-sky-400" />
+                      2. Restore Wallet
+                    </h4>
+                    <p className="text-[11px] text-slate-500 leading-relaxed mb-4">
+                      Restore your master private key and address history instantly. Drag & drop or click below to upload your downloaded recovery JSON backup file.
+                    </p>
+
+                    {/* Hidden input element */}
+                    <input
+                      type="file"
+                      id="recovery-upload-input"
+                      accept=".json"
+                      onChange={handleUploadRecoveryFile}
+                      className="hidden"
+                    />
+
+                    <label
+                      htmlFor="recovery-upload-input"
+                      className="border border-dashed border-slate-800 bg-slate-950 hover:bg-slate-900/30 rounded-xl p-6 flex flex-col items-center justify-center gap-2 cursor-pointer transition-all text-center group"
+                    >
+                      <Upload className="w-6 h-6 text-slate-500 group-hover:text-sky-400 transition-colors" />
+                      <span className="text-xs font-semibold text-slate-300">Choose Recovery JSON File</span>
+                      <span className="text-[10px] text-slate-500">Supports .json files generated by splittoooor</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* Faucet Card (Regtest only) OR Production Instructions Card */}
             {networkMode === 'regtest' ? (
               <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
@@ -2503,13 +2693,34 @@ export default function App() {
 
                 {/* Single Split Spends Action Button */}
                 <div className="pt-4">
-                  <button
-                    onClick={executeBilateralSplit}
-                    disabled={splittingBilateral || !selectedUtxoToSplit}
-                    className="w-full sm:w-auto px-6 py-3 font-semibold text-sm rounded-xl text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/10"
-                  >
-                    {splittingBilateral ? 'Executing Main-Chain Scriptpath Spend...' : 'Split Coins (Scriptpath Spend)'}
-                  </button>
+                  {!recoveryDownloaded ? (
+                    <div className="bg-amber-950/25 border border-amber-900/60 p-5 rounded-2xl space-y-4 max-w-2xl shadow-xl">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                        <div>
+                          <h4 className="text-sm font-semibold text-amber-300">Safety Lock: Backup Required Before Splitting</h4>
+                          <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                            To protect your newly deposited funds on both chains against accidental loss, you must download your recovery backup file containing your Master Seed before proceeding with any coin-split operations.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleDownloadRecoveryFile}
+                        className="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-xl flex items-center gap-2 transition-all shadow-lg shadow-amber-600/15"
+                      >
+                        <Download className="w-4 h-4" />
+                        Download Recovery Backup File & Unlock
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={executeBilateralSplit}
+                      disabled={splittingBilateral || !selectedUtxoToSplit}
+                      className="w-full sm:w-auto px-6 py-3 font-semibold text-sm rounded-xl text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/10"
+                    >
+                      {splittingBilateral ? 'Executing Main-Chain Scriptpath Spend...' : 'Split Coins (Scriptpath Spend)'}
+                    </button>
+                  )}
                 </div>
 
                 {/* Bilateral Split Spend results */}
