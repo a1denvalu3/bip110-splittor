@@ -218,7 +218,7 @@ async function runFullSwapTest() {
     console.log(`   - BIP110-Chain HTLC Address: ${htlcBip110Addr}`);
 
     const htlcFundTxBip110 = PureBitcoinSwap.buildHtlcFundingTx(
-        initiator, initSplitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), bitcoin.networks.regtest
+        initiator, initSplitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), undefined, 5000n, bitcoin.networks.regtest
     );
 
     const htlcFundTxidBip110 = await bip110Rpc.call('sendrawtransaction', [htlcFundTxBip110.toHex()]);
@@ -241,7 +241,7 @@ async function runFullSwapTest() {
     console.log(`   - Main-Chain HTLC Address: ${htlcMainAddr}`);
 
     const htlcFundTxMain = PureBitcoinSwap.buildHtlcFundingTx(
-        acceptor, accSplitTxidMain, accSplitOutIdxMainTx, 999000000n, 998000000n, htlcMainAddr, accSplitDestPayment, Buffer.alloc(0), bitcoin.networks.regtest
+        acceptor, accSplitTxidMain, accSplitOutIdxMainTx, 999000000n, 998000000n, htlcMainAddr, accSplitDestPayment, Buffer.alloc(0), undefined, 5000n, bitcoin.networks.regtest
     );
 
     const htlcFundTxidMain = await mainRpc.call('sendrawtransaction', [htlcFundTxMain.toHex()]);

@@ -264,32 +264,7 @@ async function getTxConfirmations(txid: string | undefined, chain: 'main' | 'bip
 app.get('/api/offers', async (req: Request, res: Response) => {
     const mode = NETWORK_MODE;
     try {
-        const rows = await dbAll(
-            "SELECT * FROM offers WHERE networkMode = ? ORDER BY createdAt DESC",
-            [mode]
-        );
-
-        const fetchedOffers: Offer[] = rows.map(r => ({
-            id: r.id,
-            status: r.status,
-            initiatorPubKey: r.initiatorPubKey,
-            initiatorB110Amount: Number(r.initiatorB110Amount),
-            acceptorPubKey: r.acceptorPubKey || undefined,
-            acceptorBtcAmount: Number(r.acceptorBtcAmount),
-            hashLock: r.hashLock,
-            lockTime: Number(r.lockTime),
-            b110HtlcAddress: r.b110HtlcAddress || undefined,
-            btcHtlcAddress: r.btcHtlcAddress || undefined,
-            b110HtlcTxid: r.b110HtlcTxid || undefined,
-            btcHtlcTxid: r.btcHtlcTxid || undefined,
-            preimage: r.preimage || undefined,
-            networkMode: r.networkMode,
-            createdAt: Number(r.createdAt),
-            backingTxid: r.backingTxid || undefined,
-            backingVout: r.backingVout !== null ? Number(r.backingVout) : undefined,
-            backingChain: r.backingChain || undefined,
-            acceptorClaimed: r.acceptorClaimed === 1
-        }));
+        const fetchedOffers = await getOffersByMode(mode);
 
         const updatedOffers = await Promise.all(fetchedOffers.map(async o => {
             let isPending = false;
@@ -316,7 +291,20 @@ app.get('/api/offers', async (req: Request, res: Response) => {
                 }
             }
             
-            return { ...o, isPending };
+            return {
+                ...o,
+                acceptorPubKey: o.acceptorPubKey || undefined,
+                b110HtlcAddress: o.b110HtlcAddress || undefined,
+                btcHtlcAddress: o.btcHtlcAddress || undefined,
+                b110HtlcTxid: o.b110HtlcTxid || undefined,
+                btcHtlcTxid: o.btcHtlcTxid || undefined,
+                preimage: o.preimage || undefined,
+                backingTxid: o.backingTxid || undefined,
+                backingVout: o.backingVout !== null ? Number(o.backingVout) : undefined,
+                backingChain: o.backingChain || undefined,
+                acceptorClaimed: o.acceptorClaimed === 1,
+                isPending
+            };
         }));
 
         res.json(updatedOffers);
@@ -334,39 +322,35 @@ app.post('/api/offers', async (req: Request, res: Response) => {
     }
 
     const id = Math.random().toString(36).substring(2, 11);
-    const createdAt = Date.now();
 
     try {
-        await dbRun(`
-            INSERT INTO offers (
-                id, status, initiatorPubKey, initiatorB110Amount, acceptorPubKey, acceptorBtcAmount,
-                hashLock, lockTime, b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid,
-                preimage, networkMode, createdAt, backingTxid, backingVout, backingChain, acceptorClaimed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-        `, [
-            id, 'OPEN', initiatorPubKey, Number(initiatorB110Amount), null, Number(acceptorBtcAmount),
-            hashLock, Number(lockTime), null, null, null, null,
-            null, NETWORK_MODE, createdAt, backingTxid || null, 
-            backingVout !== undefined ? Number(backingVout) : null, backingChain || null
-        ]);
-
-        const newOffer: Offer = {
+        await insertOffer({
             id,
-            status: 'OPEN',
             initiatorPubKey,
             initiatorB110Amount: Number(initiatorB110Amount),
             acceptorBtcAmount: Number(acceptorBtcAmount),
             hashLock,
             lockTime: Number(lockTime),
             networkMode: NETWORK_MODE,
-            createdAt,
-            backingTxid: backingTxid || undefined,
-            backingVout: backingVout !== undefined ? Number(backingVout) : undefined,
-            backingChain: backingChain || undefined,
-            acceptorClaimed: false
-        };
+            backingTxid: backingTxid || null,
+            backingVout: backingVout !== undefined ? Number(backingVout) : null,
+            backingChain: backingChain || null
+        });
 
-        res.status(201).json(newOffer);
+        const newOffer = await getOfferById(id);
+        res.status(201).json({
+            ...newOffer,
+            acceptorPubKey: newOffer?.acceptorPubKey || undefined,
+            b110HtlcAddress: newOffer?.b110HtlcAddress || undefined,
+            btcHtlcAddress: newOffer?.btcHtlcAddress || undefined,
+            b110HtlcTxid: newOffer?.b110HtlcTxid || undefined,
+            btcHtlcTxid: newOffer?.btcHtlcTxid || undefined,
+            preimage: newOffer?.preimage || undefined,
+            backingTxid: newOffer?.backingTxid || undefined,
+            backingVout: newOffer?.backingVout !== null ? Number(newOffer?.backingVout) : undefined,
+            backingChain: newOffer?.backingChain || undefined,
+            acceptorClaimed: newOffer?.acceptorClaimed === 1
+        });
     } catch (err: any) {
         res.status(500).json({ error: "Failed to store offer in database: " + err.message });
     }
@@ -382,7 +366,7 @@ app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
     }
 
     try {
-        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        const offer = await getOfferById(id);
         if (!offer) {
             return res.status(404).json({ error: "Offer not found" });
         }
@@ -390,18 +374,22 @@ app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Offer is not in OPEN status" });
         }
 
-        await dbRun(
-            "UPDATE offers SET acceptorPubKey = ?, status = 'ACCEPTED' WHERE id = ?",
-            [acceptorPubKey, id]
-        );
+        await acceptOfferById(id, acceptorPubKey);
 
-        const updated = {
-            ...offer,
-            acceptorPubKey,
-            status: 'ACCEPTED',
-            acceptorClaimed: offer.acceptorClaimed === 1
-        };
-        res.json(updated);
+        const updated = await getOfferById(id);
+        res.json({
+            ...updated,
+            acceptorPubKey: updated?.acceptorPubKey || undefined,
+            b110HtlcAddress: updated?.b110HtlcAddress || undefined,
+            btcHtlcAddress: updated?.btcHtlcAddress || undefined,
+            b110HtlcTxid: updated?.b110HtlcTxid || undefined,
+            btcHtlcTxid: updated?.btcHtlcTxid || undefined,
+            preimage: updated?.preimage || undefined,
+            backingTxid: updated?.backingTxid || undefined,
+            backingVout: updated?.backingVout !== null ? Number(updated?.backingVout) : undefined,
+            backingChain: updated?.backingChain || undefined,
+            acceptorClaimed: updated?.acceptorClaimed === 1
+        });
     } catch (err: any) {
         res.status(500).json({ error: "Database error during acceptance: " + err.message });
     }
@@ -523,7 +511,7 @@ app.post('/api/offers/:id/delete', async (req: Request, res: Response) => {
         }
 
         // Signature is valid. Delete from SQLite database
-        await dbRun("DELETE FROM offers WHERE id = ?", [id]);
+        await deleteOfferById(id);
         console.log(`[DELETE] Deleted offer #${id} successfully.`);
         res.json({ success: true, message: `Offer #${id} deleted successfully.` });
     } catch (err: any) {
@@ -541,7 +529,7 @@ app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
     }
 
     try {
-        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        const offer = await getOfferById(id);
         if (!offer) {
             return res.status(404).json({ error: "Offer not found" });
         }
@@ -577,10 +565,7 @@ app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
         }
 
         // Reset the offer status back to OPEN and clear acceptorPubKey
-        await dbRun(
-            "UPDATE offers SET status = 'OPEN', acceptorPubKey = NULL WHERE id = ?",
-            [id]
-        );
+        await walkbackAcceptanceById(id);
 
         console.log(`[WALKBACK] Acceptor walked back their acceptance on offer #${id}. Reset to OPEN.`);
         res.json({ success: true, message: `Successfully walked back acceptance on offer #${id}. Status reset to OPEN.` });

@@ -169,7 +169,7 @@ async function runRefundAndFailureTest() {
     const initSplitOutIdxBip110Tx = await findOutputIndex(bip110Rpc, splitTxidBip110, initSplitDestScriptHexBip110);
 
     const htlcFundTxBip110 = PureBitcoinSwap.buildHtlcFundingTx(
-        initiator, splitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), bitcoin.networks.regtest
+        initiator, splitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), undefined, 5000n, bitcoin.networks.regtest
     );
     const htlcFundTxidBip110 = await bip110Rpc.call('sendrawtransaction', [htlcFundTxBip110.toHex()]);
     await bip110Rpc.call('generatetoaddress', [1, minerAddrBip110]);
