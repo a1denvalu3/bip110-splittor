@@ -74,6 +74,11 @@ const NETWORK_MODE: 'mainnet' | 'regtest' =
 
 console.log(`[BOOT] BIP110 Splittoooor Backend starting up in [${NETWORK_MODE.toUpperCase()}] mode.`);
 
+const BIP110_EXPLORER_URL = process.env.BIP110_EXPLORER_URL || 'https://mempool.bip110.space';
+if (NETWORK_MODE === 'mainnet') {
+    console.log(`[BOOT] BIP110 Mainnet Explorer API URL configured as: [${BIP110_EXPLORER_URL}]`);
+}
+
 // Strict state machine for valid Atomic Swap offer status transitions
 const ALLOWED_TRANSITIONS: Record<string, string[]> = {
     'OPEN': ['ACCEPTED'],
@@ -182,11 +187,6 @@ const bip110WatchRpc = new BitcoinRpc(18444, 'watchonly');
 const mainRootRpc = new BitcoinRpc(18443);
 const bip110RootRpc = new BitcoinRpc(18444);
 
-// Helper to parse custom user BIP110 Explorer API URL
-function getCustomBip110Explorer(req: Request): string | null {
-    return req.headers['x-bip110-explorer-api'] as string || null;
-}
-
 // Initialize dual wallets and P2P connection on startup
 async function initNodeWallets() {
     console.log("Connecting to Bitcoin nodes...");
@@ -254,8 +254,7 @@ async function initNodeWallets() {
 async function getTxConfirmations(
     txid: string | undefined,
     chain: 'main' | 'bip110',
-    mode: 'mainnet' | 'regtest' = 'regtest',
-    customBip110Explorer?: string | null
+    mode: 'mainnet' | 'regtest' = 'regtest'
 ): Promise<number> {
     if (!txid) return 0;
     if (mode === 'mainnet') {
@@ -268,9 +267,8 @@ async function getTxConfirmations(
                 return 0;
             }
         } else {
-            if (!customBip110Explorer) return 0;
             try {
-                const url = `${customBip110Explorer}/api/tx/${txid}/status`;
+                const url = `${BIP110_EXPLORER_URL}/api/tx/${txid}/status`;
                 const response = await axios.get(url, { timeout: 3000 });
                 return response.data.confirmed ? 1 : 0;
             } catch {
@@ -291,7 +289,6 @@ async function getTxConfirmations(
 // 1. Get Marketplace Offers
 app.get('/api/offers', async (req: Request, res: Response) => {
     const mode = NETWORK_MODE;
-    const customBip110Explorer = getCustomBip110Explorer(req);
     try {
         const fetchedOffers = await getOffersByMode(mode);
 
@@ -300,9 +297,9 @@ app.get('/api/offers', async (req: Request, res: Response) => {
             
             // 1. Check if the backing split UTXO is confirmed
             if (o.backingTxid) {
-                let confs = await getTxConfirmations(o.backingTxid, 'bip110', mode, customBip110Explorer);
+                let confs = await getTxConfirmations(o.backingTxid, 'bip110', mode);
                 if (confs === 0) {
-                    confs = await getTxConfirmations(o.backingTxid, 'main', mode, customBip110Explorer);
+                    confs = await getTxConfirmations(o.backingTxid, 'main', mode);
                 }
                 if (confs < 1) {
                     isPending = true;
@@ -312,10 +309,10 @@ app.get('/api/offers', async (req: Request, res: Response) => {
             // 2. Check if the active Escrow funding transactions are confirmed
             if (!isPending) {
                 if (o.status === 'FUNDED_INITIATOR' && o.b110HtlcTxid) {
-                    const confs = await getTxConfirmations(o.b110HtlcTxid, 'bip110', mode, customBip110Explorer);
+                    const confs = await getTxConfirmations(o.b110HtlcTxid, 'bip110', mode);
                     if (confs < 1) isPending = true;
                 } else if (o.status === 'FUNDED_ACCEPTOR' && o.btcHtlcTxid) {
-                    const confs = await getTxConfirmations(o.btcHtlcTxid, 'main', mode, customBip110Explorer);
+                    const confs = await getTxConfirmations(o.btcHtlcTxid, 'main', mode);
                     if (confs < 1) isPending = true;
                 }
             }
@@ -627,16 +624,9 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
                 return res.json({ address, chain, utxos: [] });
             }
         } else {
-            // BIP110 on Mainnet: must query custom BIP110 explorer URL
-            const customExplorer = getCustomBip110Explorer(req);
-            if (!customExplorer) {
-                return res.status(400).json({
-                    error: "BIP110 Explorer Connection Required: Please configure and connect your BIP110 Explorer API URL in the settings panel."
-                });
-            }
-
+            // BIP110 on Mainnet: must query server-configured BIP110 explorer
             try {
-                const response = await axios.get(`${customExplorer}/api/address/${address}/utxo`, { timeout: 5000 });
+                const response = await axios.get(`${BIP110_EXPLORER_URL}/api/address/${address}/utxo`, { timeout: 5000 });
                 const utxos = response.data.map((u: any) => ({
                     txid: u.txid,
                     vout: u.vout,
@@ -751,16 +741,9 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
                 return res.status(400).json({ error: `[Mempool Broadcaster] ${msg}` });
             }
         } else {
-            // BIP110 chain broadcast on Mainnet: must use custom BIP110 explorer URL
-            const customExplorer = getCustomBip110Explorer(req);
-            if (!customExplorer) {
-                return res.status(400).json({
-                    error: "BIP110 Explorer Connection Required: Please configure and connect your BIP110 Explorer API URL in the settings panel to broadcast transactions on the BIP110-Chain."
-                });
-            }
-
+            // BIP110 chain broadcast on Mainnet: must use server-configured explorer
             try {
-                const response = await axios.post(`${customExplorer}/api/tx`, hex, {
+                const response = await axios.post(`${BIP110_EXPLORER_URL}/api/tx`, hex, {
                     headers: { 'Content-Type': 'text/plain' }
                 });
                 return res.json({ success: true, txid: response.data });
@@ -791,15 +774,12 @@ app.get('/api/node/info', async (req: Request, res: Response) => {
             const msRes = await axios.get('https://mempool.space/api/blocks/tip/height', { timeout: 3000 });
             const mainHeight = Number(msRes.data);
             
-            // On mainnet, fetch from custom explorer if connected, otherwise default to 0
+            // On mainnet, fetch from server-configured explorer
             let bip110Height = 0;
-            const customExplorer = getCustomBip110Explorer(req);
-            if (customExplorer) {
-                try {
-                    const bipRes = await axios.get(`${customExplorer}/api/blocks/tip/height`, { timeout: 3000 });
-                    bip110Height = Number(bipRes.data);
-                } catch {}
-            }
+            try {
+                const bipRes = await axios.get(`${BIP110_EXPLORER_URL}/api/blocks/tip/height`, { timeout: 3000 });
+                bip110Height = Number(bipRes.data);
+            } catch {}
             
             return res.json({
                 mainHeight,

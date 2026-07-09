@@ -111,29 +111,6 @@ export default function App() {
   const [revealMasterPrivKey, setRevealMasterPrivKey] = useState<boolean>(false);
   const [recoveryDownloaded, setRecoveryDownloaded] = useState<boolean>(false);
 
-  // Custom BIP110 Explorer Settings State
-  const [customExplorer, setCustomExplorer] = useState<string | null>(() => {
-    return localStorage.getItem('bip110_custom_explorer');
-  });
-
-  const [explorerInput, setExplorerInput] = useState<string>('');
-  const [testingExplorer, setTestingExplorer] = useState<boolean>(false);
-
-  const getBip110ExplorerHeaders = () => {
-    if (!customExplorer) return {};
-    return {
-      'x-bip110-explorer-api': customExplorer
-    };
-  };
-
-  useEffect(() => {
-    if (customExplorer) {
-      setExplorerInput(customExplorer);
-    } else {
-      setExplorerInput('https://mempool.bip110.space');
-    }
-  }, [customExplorer]);
-
   // Active derived states (at activeIndex)
   const [privateKey, setPrivateKey] = useState<string>('');
   const [publicKey, setPublicKey] = useState<string>('');
@@ -514,7 +491,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        }, { headers: getBip110ExplorerHeaders() });
+        });
 
         // Update Offer State on server
         const role = selectedOffer.initiatorPubKey === publicKey ? 'initiator' : 'acceptor';
@@ -1014,7 +991,7 @@ export default function App() {
 
   const fetchNodeInfo = async () => {
     try {
-      const res = await axios.get(`${API_BASE}/node/info`, { headers: getBip110ExplorerHeaders() });
+      const res = await axios.get(`${API_BASE}/node/info`);
       setNodeInfo({ mainHeight: res.data.mainHeight, bip110Height: res.data.bip110Height });
     } catch (err: any) {
       console.error(err);
@@ -1023,7 +1000,7 @@ export default function App() {
 
   const fetchOffers = async () => {
     try {
-      const res = await axios.get(`${API_BASE}/offers?networkMode=${networkMode}`, { headers: getBip110ExplorerHeaders() });
+      const res = await axios.get(`${API_BASE}/offers?networkMode=${networkMode}`);
       setOffersList(res.data);
     } catch (err: any) {
       console.error(err);
@@ -1044,20 +1021,20 @@ export default function App() {
         const childKeys = deriveKeysForIndex(masterPrivateKey, i, net);
         
         // 1. Fetch Contract UTXOs (Unsplit)
-        const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'main', networkMode }, { headers: getBip110ExplorerHeaders() });
+        const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'main', networkMode });
         const mainWithIndex = resMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
         aggregatedMainUtxos.push(...mainWithIndex);
 
-        const resBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'bip110', networkMode }, { headers: getBip110ExplorerHeaders() });
+        const resBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'bip110', networkMode });
         const bip110WithIndex = resBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
         aggregatedBip110Utxos.push(...bip110WithIndex);
 
         // 2. Fetch Own Keypath Address UTXOs (Already split)
-        const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'main', networkMode }, { headers: getBip110ExplorerHeaders() });
+        const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'main', networkMode });
         const ownMainWithIndex = resOwnMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
         aggregatedOwnMainUtxos.push(...ownMainWithIndex);
 
-        const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'bip110', networkMode }, { headers: getBip110ExplorerHeaders() });
+        const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'bip110', networkMode });
         const ownBip110WithIndex = resOwnBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
         aggregatedOwnBip110Utxos.push(...ownBip110WithIndex);
       }
@@ -1168,7 +1145,7 @@ export default function App() {
         chain: 'main',
         networkMode,
         isSplit: true
-      }, { headers: getBip110ExplorerHeaders() });
+      });
 
       mainTxid = resMain.data.txid;
       mainSuccess = true;
@@ -1277,7 +1254,7 @@ export default function App() {
         hex: tx.toHex(),
         chain: targetChain,
         networkMode
-      }, { headers: getBip110ExplorerHeaders() });
+      });
 
       showToast(`Withdrawal successfully broadcasted on ${isMainChain ? 'Bitcoin Core' : 'BIP110-Chain'}! TxID: ${broadcastRes.data.txid}`, 'success');
       
@@ -1570,7 +1547,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        }, { headers: getBip110ExplorerHeaders() });
+        });
 
         // 5. Update Offer State on server
         const updateParams: any = {
@@ -1692,7 +1669,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        }, { headers: getBip110ExplorerHeaders() });
+        });
 
         // 5. Update Offer State on server
         const updateParams: any = {
@@ -1795,7 +1772,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        }, { headers: getBip110ExplorerHeaders() });
+        });
 
         // Update Offer State on server
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
@@ -1878,7 +1855,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        }, { headers: getBip110ExplorerHeaders() });
+        });
 
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
           status: 'CLAIMED',
@@ -1898,34 +1875,6 @@ export default function App() {
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     showToast('Copied to clipboard!', 'success');
-  };
-
-  const testAndConnectNode = async () => {
-    setTestingExplorer(true);
-    try {
-      const headers = {
-        'x-bip110-explorer-api': explorerInput
-      };
-
-      const res = await axios.get(`${API_BASE}/node/info`, { headers });
-      
-      setCustomExplorer(explorerInput);
-      localStorage.setItem('bip110_custom_explorer', explorerInput);
-
-      showToast(`Connected successfully! BIP110 Custom Explorer height is #${res.data.bip110Height}.`, 'success');
-      await fetchBalances();
-    } catch (err: any) {
-      const errMsg = err.response?.data?.error || err.message;
-      showToast(`Failed to connect to BIP110 Explorer: ${errMsg}`, 'error');
-    } finally {
-      setTestingExplorer(false);
-    }
-  };
-
-  const disconnectNode = () => {
-    setCustomExplorer(null);
-    localStorage.removeItem('bip110_custom_explorer');
-    showToast('Disconnected custom BIP110 Explorer. Reverted to default.', 'info');
   };
 
   const blockLead = nodeInfo.mainHeight - nodeInfo.bip110Height;
@@ -2089,78 +2038,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-8 w-full">
-        {networkMode === 'mainnet' && !customExplorer ? (
-          <div className="bg-slate-900/50 border border-indigo-900/40 rounded-3xl p-8 md:p-12 shadow-2xl flex flex-col items-center text-center space-y-6 max-w-2xl mx-auto backdrop-blur-sm mt-8 animate-fade-in">
-            <div className="w-16 h-16 rounded-2xl bg-indigo-950/40 border border-indigo-500/50 flex items-center justify-center shadow-lg shadow-indigo-500/10">
-              <Globe className="w-8 h-8 text-indigo-400 animate-pulse" />
-            </div>
-
-            <div className="space-y-2">
-              <span className="text-[10px] font-bold text-indigo-400 bg-indigo-950/40 border border-indigo-900/60 px-3 py-1 rounded-full uppercase tracking-wider animate-pulse">
-                Production Activation Required
-              </span>
-              <h2 className="text-xl md:text-2xl font-bold tracking-tight text-slate-100 mt-2">
-                Connect a BIP110 Explorer API
-              </h2>
-              <p className="text-xs text-slate-400 max-w-lg mx-auto leading-relaxed">
-                To interact safely on the live Bitcoin network under a BIP110 split, you must connect a <strong>Mempool.space-compatible Explorer API running on a Knots+BIP110 node</strong>. Since we do not have a public global API as reliable as Mempool.space for the BIP110 subset chain, providing your own custom Explorer endpoint is required to fetch balances, check transaction confirmations, and broadcast atomic contracts safely.
-              </p>
-            </div>
-
-            {/* Connection Credentials Form */}
-            <div className="w-full max-w-md bg-slate-950 border border-slate-900 p-5 rounded-2xl space-y-4 text-left shadow-2xl">
-              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider border-b border-slate-900 pb-2 flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-sky-400" />
-                BIP110 Explorer Settings
-              </h4>
-
-              <div>
-                <label className="text-[10px] font-bold text-slate-500 block uppercase mb-1.5">Custom Explorer API URL</label>
-                <input
-                  type="text"
-                  value={explorerInput}
-                  onChange={(e) => setExplorerInput(e.target.value)}
-                  placeholder="https://mempool.bip110.space"
-                  className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
-                />
-                <span className="text-[9px] text-slate-500 mt-1 block">
-                  Must support standard Mempool.space API paths (e.g. <code>/api/address/.../utxo</code>)
-                </span>
-              </div>
-
-              <button
-                onClick={testAndConnectNode}
-                disabled={testingExplorer}
-                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-indigo-600/10"
-              >
-                {testingExplorer ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Testing Explorer Connection...
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle className="w-4 h-4" />
-                    Connect & Activate Portal
-                  </>
-                )}
-              </button>
-            </div>
-
-            <div className="text-[11px] text-slate-500 flex items-center gap-2">
-              <span>Or switch back to testing environment:</span>
-              <button
-                onClick={() => {
-                  setNetworkMode('regtest');
-                  showToast("Switched back to local Regtest simulation mode.", "info");
-                }}
-                className="text-indigo-400 hover:text-indigo-300 font-semibold underline"
-              >
-                Launch Regtest Simulator
-              </button>
-            </div>
-          </div>
-        ) : isLockoutActive ? (
+        {isLockoutActive ? (
           <div className="bg-slate-900/50 border border-amber-900/40 rounded-3xl p-8 md:p-12 shadow-2xl flex flex-col items-center text-center space-y-6 max-w-3xl mx-auto backdrop-blur-sm mt-8 animate-fade-in">
             <div className="w-16 h-16 rounded-2xl bg-amber-950/40 border border-amber-500/50 flex items-center justify-center shadow-lg shadow-amber-500/10">
               <AlertTriangle className="w-8 h-8 text-amber-500 animate-bounce" />
@@ -2436,76 +2314,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-
-            {/* BIP110 Custom Explorer Settings Card (Only needed in production Mainnet environment) */}
-            {networkMode === 'mainnet' && (
-              <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
-                <div>
-                  <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                    <Globe className="w-5 h-5 text-sky-400" />
-                    BIP110 Knots Explorer Settings
-                  </h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    ⚠️ REQUIRED FOR PRODUCTION: Since BIP110 is a consensus subset, you cannot broadcast BIP110 transactions on the Main-Chain. You must connect a Mempool.space-compatible Explorer API running on a Knots+BIP110 node to load balances, track confirmations, and broadcast transactions safely.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold text-slate-500 block uppercase mb-1.5">Custom Explorer API URL</label>
-                  <input
-                    type="text"
-                    value={explorerInput}
-                    onChange={(e) => setExplorerInput(e.target.value)}
-                    placeholder="https://mempool.bip110.space"
-                    className="w-full sm:w-1/2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
-                  />
-                </div>
-
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t border-slate-850">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-slate-400">Explorer Status:</span>
-                    {customExplorer ? (
-                      <span className="text-xs font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2.5 py-0.5 rounded-full flex items-center gap-1 font-mono">
-                        <Check className="w-3.5 h-3.5" />
-                        CONNECTED ({customExplorer})
-                      </span>
-                    ) : (
-                      <span className="text-xs font-bold text-slate-500 bg-slate-900/80 border border-slate-800 px-2.5 py-0.5 rounded-full uppercase">
-                        OFFLINE
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex gap-3 w-full sm:w-auto">
-                    {customExplorer && (
-                      <button
-                        onClick={disconnectNode}
-                        className="px-4 py-2 text-xs font-semibold text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-950/40 border border-rose-900/40 rounded-xl transition-all w-full sm:w-auto"
-                      >
-                        Disconnect Explorer
-                      </button>
-                    )}
-                    <button
-                      onClick={testAndConnectNode}
-                      disabled={testingExplorer}
-                      className="px-5 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-sky-600/10 w-full sm:w-auto"
-                    >
-                      {testingExplorer ? (
-                        <>
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          Connecting...
-                        </>
-                      ) : (
-                        <>
-                          <Globe className="w-3.5 h-3.5" />
-                          Connect & Verify Explorer
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
 
             {/* Faucet Card (Regtest only) OR Production Instructions Card */}
             {networkMode === 'regtest' ? (
