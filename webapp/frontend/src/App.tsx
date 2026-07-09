@@ -165,16 +165,41 @@ export default function App() {
     return networkMode === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
   };
 
-  // Helper to determine if a BIP110-Chain contract UTXO is split
-  // It is split if it exists on BIP110 but does NOT exist on the Main-Chain (meaning the Main-Chain has successfully spent it!)
+  // Helper to determine if a split contract UTXO is unsplit (valid on both chains)
+  const isUtxoUnsplit = (u: UTXO): boolean => {
+    return mainUtxos.some(mainU => mainU.txid === u.txid && mainU.vout === u.vout) &&
+           bip110Utxos.some(bipU => bipU.txid === u.txid && bipU.vout === u.vout);
+  };
+
+  // Helper to determine if a UTXO is split (replay-protected on one chain only)
+  const isUtxoSplit = (u: UTXO): boolean => {
+    return !isUtxoUnsplit(u);
+  };
+
+  // Legacy compatibility mapping
   const isBip110UtxoSplit = (u: UTXO): boolean => {
-    return !mainUtxos.some(mainU => mainU.txid === u.txid && mainU.vout === u.vout);
+    return isUtxoSplit(u);
+  };
+
+  // Helper to get total Main-Chain unsplit balance
+  const getMainUnsplitBalance = (): number => {
+    return mainUtxos
+      .filter(u => isUtxoUnsplit(u))
+      .reduce((sum, u) => sum + u.amount, 0);
+  };
+
+  // Helper to get total Main-Chain split balance
+  const getMainSplitBalance = (): number => {
+    const splitContractMain = mainUtxos
+      .filter(u => !isUtxoUnsplit(u))
+      .reduce((sum, u) => sum + u.amount, 0);
+    return splitContractMain + ownMainBalance;
   };
 
   // Helper to get total BIP110 split balance
   const getBip110SplitBalance = (): number => {
     const splitContractB110 = bip110Utxos
-      .filter(u => isBip110UtxoSplit(u))
+      .filter(u => !isUtxoUnsplit(u))
       .reduce((sum, u) => sum + u.amount, 0);
     return splitContractB110 + ownBip110Balance;
   };
@@ -182,7 +207,7 @@ export default function App() {
   // Helper to get total BIP110 unsplit balance
   const getBip110UnsplitBalance = (): number => {
     return bip110Utxos
-      .filter(u => !isBip110UtxoSplit(u))
+      .filter(u => isUtxoUnsplit(u))
       .reduce((sum, u) => sum + u.amount, 0);
   };
 
@@ -1808,7 +1833,7 @@ export default function App() {
                       {((mainBalance + ownMainBalance) / 100000000).toFixed(4)} {networkMode === 'mainnet' ? 'BTC' : 'rBTC'}
                     </span>
                     <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
-                      {(mainBalance / 100000000).toFixed(4)} Unsplit + {(ownMainBalance / 100000000).toFixed(4)} Split
+                      {(getMainUnsplitBalance() / 100000000).toFixed(4)} Unsplit + {(getMainSplitBalance() / 100000000).toFixed(4)} Split
                     </span>
                   </div>
                   <div className="flex-1 border-t sm:border-t-0 sm:border-l border-slate-800 pt-4 sm:pt-0 sm:pl-4">
@@ -1937,22 +1962,39 @@ export default function App() {
                       <div className="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-800 rounded-xl">No unspent outputs.</div>
                     ) : (
                       <div className="space-y-2">
-                        {/* Render Unsplit UTXOs */}
-                        {mainUtxos.map((u, i) => (
-                          <div key={`unsplit-${i}`} className="bg-slate-950 border border-slate-800/60 p-2.5 rounded-xl text-xs flex justify-between items-center">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
-                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
-                                u.confirmations < 1 
-                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
-                                  : 'bg-slate-900 border border-slate-800 text-slate-400'
-                              }`}>
-                                {u.confirmations < 1 ? '⏳ PENDING' : '⏳ Unsplit'}
-                              </span>
+                        {/* Render Main-Chain UTXOs with dynamic split check */}
+                        {mainUtxos.map((u, i) => {
+                          const isSplit = isUtxoSplit(u);
+                          return (
+                            <div key={`main-${i}`} className={`p-2.5 rounded-xl text-xs flex justify-between items-center ${
+                              isSplit 
+                                ? 'bg-slate-900/40 border border-emerald-950 shadow-sm shadow-emerald-500/5' 
+                                : 'bg-slate-950 border border-slate-800/60'
+                            }`}>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
+                                {isSplit ? (
+                                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                    u.confirmations < 1 
+                                      ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
+                                      : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-400'
+                                  }`}>
+                                    {u.confirmations < 1 ? '🛡️ PENDING' : '🛡️ Split'}
+                                  </span>
+                                ) : (
+                                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                    u.confirmations < 1 
+                                      ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
+                                      : 'bg-slate-900 border border-slate-800 text-slate-400'
+                                  }`}>
+                                    {u.confirmations < 1 ? '⏳ PENDING' : '⏳ Unsplit'}
+                                  </span>
+                                )}
+                              </div>
+                              <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
                             </div>
-                            <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
-                          </div>
-                        ))}
+                          );
+                        })}
                         {/* Render Already Split UTXOs */}
                         {ownMainUtxos.map((u, i) => (
                           <div key={`split-${i}`} className="bg-slate-900/40 border border-emerald-950 p-2.5 rounded-xl text-xs flex justify-between items-center shadow-sm shadow-emerald-500/5">
