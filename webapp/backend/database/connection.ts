@@ -1,8 +1,29 @@
 import sqlite3 from 'sqlite3';
 import path from 'path';
+import fs from 'fs';
 
 // Store DB in the webapp directory so it persists across container rebuilds or restarts
 const dbPath = path.resolve(__dirname, '../bip110_swap.db');
+
+// Check if starting in regtest mode to start everything from zero
+const args = process.argv.slice(2);
+const isRegtest = !(
+    args.includes('--mainnet') || 
+    args.includes('--network=mainnet') || 
+    process.env.NETWORK_MODE === 'mainnet'
+);
+
+if (isRegtest) {
+    console.log("[DB] Regtest mode detected. Wiping local database to start fresh from zero...");
+    try {
+        if (fs.existsSync(dbPath)) {
+            fs.unlinkSync(dbPath);
+            console.log("[DB] Existing database file deleted successfully.");
+        }
+    } catch (err: any) {
+        console.error("[DB] Failed to wipe existing database file:", err.message);
+    }
+}
 
 export const db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
