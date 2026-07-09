@@ -59,7 +59,7 @@ By eliminating sCrypt boilerplate and hand-crafting script elements, we achieve 
 
 ## Integration Tests & Verification
 
-The integration suite runs against standard, unconnected Bitcoin Core and Bitcoin Knots containers using local Regtest networks to simulate a real hard fork split.
+The integration suite runs against connected, native Bitcoin Core (v26.0) and Bitcoin Knots (v29.3 with BIP110 consensus enabled) containers on a local Regtest network. This setup represents a high-fidelity, real-time simulation of an active hard fork split.
 
 ### Prerequisites
 Make sure Docker is running on your host machine.
@@ -69,10 +69,12 @@ Make sure Docker is running on your host machine.
    ```bash
    npm install
    ```
-2. Spin up the containerized Bitcoin Core (port 18443) and Bitcoin Knots (port 18444) nodes:
+2. Spin up the containerized Bitcoin Core (RPC port 18443) and Bitcoin Knots (RPC port 18444) nodes:
    ```bash
    docker-compose up -d
    ```
+   * **BIP110 Activation:** The Bitcoin Knots container automatically activates the BIP110 `reduced_data` consensus rules immediately on startup via the version bit parameter `-vbparams=reduced_data:-1:999999999999`.
+   * **Dual-Node P2P Connection:** The Core and Knots nodes are automatically connected to each other over P2P at startup via an automated `addnode` initialization sequence. This establishes a fully connected block propagation topology prior to the hard fork split.
 
 ### Running Verification Tests
 

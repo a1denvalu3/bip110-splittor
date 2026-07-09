@@ -1,6 +1,24 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import axios from 'axios';
+import { ECPairFactory } from 'ecpair';
+import * as ecc from 'tiny-secp256k1';
+import * as bitcoin from 'bitcoinjs-lib';
+
+import { runMigrations } from './database/migrations';
+import {
+    getOffersByMode,
+    getOfferById,
+    insertOffer,
+    acceptOfferById,
+    updateOfferFieldsById,
+    deleteOfferById,
+    walkbackAcceptanceById,
+    DbOffer as Offer
+} from './database/offersCrud';
+
+bitcoin.initEccLib(ecc);
+const ECPair = ECPairFactory(ecc);
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -55,31 +73,6 @@ const NETWORK_MODE: 'mainnet' | 'regtest' =
     : 'regtest';
 
 console.log(`[BOOT] BIP110 Splittoooor Backend starting up in [${NETWORK_MODE.toUpperCase()}] mode.`);
-
-// In-memory Offer and TX Database
-interface Offer {
-    id: string;
-    status: 'OPEN' | 'ACCEPTED' | 'FUNDED_INITIATOR' | 'FUNDED_ACCEPTOR' | 'CLAIMED' | 'REFUNDED';
-    initiatorPubKey: string;      // 33-byte compressed pubkey hex
-    initiatorB110Amount: number;   // satoshis
-    acceptorPubKey?: string;       // 33-byte compressed pubkey hex
-    acceptorBtcAmount: number;     // satoshis
-    hashLock: string;              // sha256 hash hex
-    lockTime: number;              // lockTime block height or timestamp
-    b110HtlcAddress?: string;
-    btcHtlcAddress?: string;
-    b110HtlcTxid?: string;
-    btcHtlcTxid?: string;
-    preimage?: string;             // Revealed on claim
-    networkMode: 'mainnet' | 'regtest';
-    createdAt: number;
-    backingTxid?: string;
-    backingVout?: number;
-    backingChain?: 'main' | 'bip110';
-    acceptorClaimed?: boolean;
-}
-
-const offers: Record<string, Offer> = {};
 
 // Bitcoin RPC helper for Regtest with Auto-Healing Wallet Loader
 class BitcoinRpc {
@@ -260,43 +253,70 @@ async function getTxConfirmations(txid: string | undefined, chain: 'main' | 'bip
 // 1. Get Marketplace Offers
 app.get('/api/offers', async (req: Request, res: Response) => {
     const mode = NETWORK_MODE;
-    const filteredOffers = Object.values(offers)
-        .filter(o => o.networkMode === mode)
-        .sort((a, b) => b.createdAt - a.createdAt);
+    try {
+        const rows = await dbAll(
+            "SELECT * FROM offers WHERE networkMode = ? ORDER BY createdAt DESC",
+            [mode]
+        );
 
-    const updatedOffers = await Promise.all(filteredOffers.map(async o => {
-        let isPending = false;
-        
-        // 1. Check if the backing split UTXO is confirmed
-        if (o.backingTxid) {
-            let confs = await getTxConfirmations(o.backingTxid, 'bip110', mode);
-            if (confs === 0) {
-                confs = await getTxConfirmations(o.backingTxid, 'main', mode);
-            }
-            if (confs < 1) {
-                isPending = true;
-            }
-        }
-        
-        // 2. Check if the active Escrow funding transactions are confirmed
-        if (!isPending) {
-            if (o.status === 'FUNDED_INITIATOR' && o.b110HtlcTxid) {
-                const confs = await getTxConfirmations(o.b110HtlcTxid, 'bip110', mode);
-                if (confs < 1) isPending = true;
-            } else if (o.status === 'FUNDED_ACCEPTOR' && o.btcHtlcTxid) {
-                const confs = await getTxConfirmations(o.btcHtlcTxid, 'main', mode);
-                if (confs < 1) isPending = true;
-            }
-        }
-        
-        return { ...o, isPending };
-    }));
+        const fetchedOffers: Offer[] = rows.map(r => ({
+            id: r.id,
+            status: r.status,
+            initiatorPubKey: r.initiatorPubKey,
+            initiatorB110Amount: Number(r.initiatorB110Amount),
+            acceptorPubKey: r.acceptorPubKey || undefined,
+            acceptorBtcAmount: Number(r.acceptorBtcAmount),
+            hashLock: r.hashLock,
+            lockTime: Number(r.lockTime),
+            b110HtlcAddress: r.b110HtlcAddress || undefined,
+            btcHtlcAddress: r.btcHtlcAddress || undefined,
+            b110HtlcTxid: r.b110HtlcTxid || undefined,
+            btcHtlcTxid: r.btcHtlcTxid || undefined,
+            preimage: r.preimage || undefined,
+            networkMode: r.networkMode,
+            createdAt: Number(r.createdAt),
+            backingTxid: r.backingTxid || undefined,
+            backingVout: r.backingVout !== null ? Number(r.backingVout) : undefined,
+            backingChain: r.backingChain || undefined,
+            acceptorClaimed: r.acceptorClaimed === 1
+        }));
 
-    res.json(updatedOffers);
+        const updatedOffers = await Promise.all(fetchedOffers.map(async o => {
+            let isPending = false;
+            
+            // 1. Check if the backing split UTXO is confirmed
+            if (o.backingTxid) {
+                let confs = await getTxConfirmations(o.backingTxid, 'bip110', mode);
+                if (confs === 0) {
+                    confs = await getTxConfirmations(o.backingTxid, 'main', mode);
+                }
+                if (confs < 1) {
+                    isPending = true;
+                }
+            }
+            
+            // 2. Check if the active Escrow funding transactions are confirmed
+            if (!isPending) {
+                if (o.status === 'FUNDED_INITIATOR' && o.b110HtlcTxid) {
+                    const confs = await getTxConfirmations(o.b110HtlcTxid, 'bip110', mode);
+                    if (confs < 1) isPending = true;
+                } else if (o.status === 'FUNDED_ACCEPTOR' && o.btcHtlcTxid) {
+                    const confs = await getTxConfirmations(o.btcHtlcTxid, 'main', mode);
+                    if (confs < 1) isPending = true;
+                }
+            }
+            
+            return { ...o, isPending };
+        }));
+
+        res.json(updatedOffers);
+    } catch (err: any) {
+        res.status(500).json({ error: "Failed to load offers from database: " + err.message });
+    }
 });
 
 // 2. Create a Marketplace Offer
-app.post('/api/offers', (req: Request, res: Response) => {
+app.post('/api/offers', async (req: Request, res: Response) => {
     const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, backingTxid, backingVout, backingChain } = req.body;
 
     if (!initiatorPubKey || !initiatorB110Amount || !acceptorBtcAmount || !hashLock || !lockTime) {
@@ -304,66 +324,221 @@ app.post('/api/offers', (req: Request, res: Response) => {
     }
 
     const id = Math.random().toString(36).substring(2, 11);
-    const newOffer: Offer = {
-        id,
-        status: 'OPEN',
-        initiatorPubKey,
-        initiatorB110Amount: Number(initiatorB110Amount),
-        acceptorBtcAmount: Number(acceptorBtcAmount),
-        hashLock,
-        lockTime: Number(lockTime),
-        networkMode: NETWORK_MODE,
-        createdAt: Date.now(),
-        backingTxid,
-        backingVout: backingVout !== undefined ? Number(backingVout) : undefined,
-        backingChain
-    };
+    const createdAt = Date.now();
 
-    offers[id] = newOffer;
-    res.status(201).json(newOffer);
+    try {
+        await dbRun(`
+            INSERT INTO offers (
+                id, status, initiatorPubKey, initiatorB110Amount, acceptorPubKey, acceptorBtcAmount,
+                hashLock, lockTime, b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid,
+                preimage, networkMode, createdAt, backingTxid, backingVout, backingChain, acceptorClaimed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        `, [
+            id, 'OPEN', initiatorPubKey, Number(initiatorB110Amount), null, Number(acceptorBtcAmount),
+            hashLock, Number(lockTime), null, null, null, null,
+            null, NETWORK_MODE, createdAt, backingTxid || null, 
+            backingVout !== undefined ? Number(backingVout) : null, backingChain || null
+        ]);
+
+        const newOffer: Offer = {
+            id,
+            status: 'OPEN',
+            initiatorPubKey,
+            initiatorB110Amount: Number(initiatorB110Amount),
+            acceptorBtcAmount: Number(acceptorBtcAmount),
+            hashLock,
+            lockTime: Number(lockTime),
+            networkMode: NETWORK_MODE,
+            createdAt,
+            backingTxid: backingTxid || undefined,
+            backingVout: backingVout !== undefined ? Number(backingVout) : undefined,
+            backingChain: backingChain || undefined,
+            acceptorClaimed: false
+        };
+
+        res.status(201).json(newOffer);
+    } catch (err: any) {
+        res.status(500).json({ error: "Failed to store offer in database: " + err.message });
+    }
 });
 
 // 3. Accept a Marketplace Offer
-app.post('/api/offers/:id/accept', (req: Request, res: Response) => {
+app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
     const id = req.params.id as string;
     const { acceptorPubKey } = req.body;
 
-    const offer = offers[id];
-    if (!offer) {
-        return res.status(404).json({ error: "Offer not found" });
-    }
-    if (offer.status !== 'OPEN') {
-        return res.status(400).json({ error: "Offer is not in OPEN status" });
-    }
     if (!acceptorPubKey) {
         return res.status(400).json({ error: "Missing acceptorPubKey" });
     }
 
-    offer.acceptorPubKey = acceptorPubKey;
-    offer.status = 'ACCEPTED';
+    try {
+        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        if (!offer) {
+            return res.status(404).json({ error: "Offer not found" });
+        }
+        if (offer.status !== 'OPEN') {
+            return res.status(400).json({ error: "Offer is not in OPEN status" });
+        }
 
-    res.json(offer);
+        await dbRun(
+            "UPDATE offers SET acceptorPubKey = ?, status = 'ACCEPTED' WHERE id = ?",
+            [acceptorPubKey, id]
+        );
+
+        const updated = {
+            ...offer,
+            acceptorPubKey,
+            status: 'ACCEPTED',
+            acceptorClaimed: offer.acceptorClaimed === 1
+        };
+        res.json(updated);
+    } catch (err: any) {
+        res.status(500).json({ error: "Database error during acceptance: " + err.message });
+    }
 });
 
 // 4. Update HTLC Contracts / Txids
-app.post('/api/offers/:id/update', (req: Request, res: Response) => {
+app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
     const id = req.params.id as string;
     const { b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid, preimage, status, acceptorClaimed } = req.body;
 
-    const offer = offers[id];
-    if (!offer) {
-        return res.status(404).json({ error: "Offer not found" });
+    try {
+        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        if (!offer) {
+            return res.status(404).json({ error: "Offer not found" });
+        }
+
+        const updates: string[] = [];
+        const params: any[] = [];
+
+        if (b110HtlcAddress !== undefined) { updates.push("b110HtlcAddress = ?"); params.push(b110HtlcAddress); }
+        if (btcHtlcAddress !== undefined) { updates.push("btcHtlcAddress = ?"); params.push(btcHtlcAddress); }
+        if (b110HtlcTxid !== undefined) { updates.push("b110HtlcTxid = ?"); params.push(b110HtlcTxid); }
+        if (btcHtlcTxid !== undefined) { updates.push("btcHtlcTxid = ?"); params.push(btcHtlcTxid); }
+        if (preimage !== undefined) { updates.push("preimage = ?"); params.push(preimage); }
+        if (status !== undefined) { updates.push("status = ?"); params.push(status); }
+        if (acceptorClaimed !== undefined) { updates.push("acceptorClaimed = ?"); params.push(acceptorClaimed ? 1 : 0); }
+
+        if (updates.length > 0) {
+            params.push(id);
+            await dbRun(
+                `UPDATE offers SET ${updates.join(', ')} WHERE id = ?`,
+                params
+            );
+        }
+
+        const updatedOffer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        res.json({
+            ...updatedOffer,
+            acceptorClaimed: updatedOffer.acceptorClaimed === 1
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: "Database error during update: " + err.message });
+    }
+});
+
+// 4a. Delete a Marketplace Offer (Author/Initiator Only)
+app.post('/api/offers/:id/delete', async (req: Request, res: Response) => {
+    const id = req.params.id as string;
+    const { signature } = req.body;
+
+    if (!signature) {
+        return res.status(400).json({ error: "Missing verification signature to delete offer" });
     }
 
-    if (b110HtlcAddress) offer.b110HtlcAddress = b110HtlcAddress;
-    if (btcHtlcAddress) offer.btcHtlcAddress = btcHtlcAddress;
-    if (b110HtlcTxid) offer.b110HtlcTxid = b110HtlcTxid;
-    if (btcHtlcTxid) offer.btcHtlcTxid = btcHtlcTxid;
-    if (preimage) offer.preimage = preimage;
-    if (status) offer.status = status;
-    if (acceptorClaimed !== undefined) offer.acceptorClaimed = acceptorClaimed;
+    try {
+        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        if (!offer) {
+            return res.status(404).json({ error: "Offer not found" });
+        }
 
-    res.json(offer);
+        // Deletion only permitted before funds are locked (OPEN or ACCEPTED status)
+        if (offer.status !== 'OPEN' && offer.status !== 'ACCEPTED') {
+            return res.status(400).json({ error: "Cannot delete offer after funds have been locked" });
+        }
+
+        // Verify cryptographic signature from the same initiator author
+        try {
+            const msg = `delete-offer:${id}`;
+            const msgHash = bitcoin.crypto.sha256(Buffer.from(msg));
+            const sigBuf = Buffer.from(signature, 'hex');
+            const pubKeyBuf = Buffer.from(offer.initiatorPubKey, 'hex');
+
+            const pair = ECPair.fromPublicKey(pubKeyBuf);
+            const verified = pair.verify(msgHash, sigBuf);
+
+            if (!verified) {
+                return res.status(401).json({ error: "Invalid signature. Deletion denied." });
+            }
+        } catch (sigErr: any) {
+            return res.status(401).json({ error: "Signature verification failed: " + sigErr.message });
+        }
+
+        // Signature is valid. Delete from SQLite database
+        await dbRun("DELETE FROM offers WHERE id = ?", [id]);
+        console.log(`[DELETE] Deleted offer #${id} successfully.`);
+        res.json({ success: true, message: `Offer #${id} deleted successfully.` });
+    } catch (err: any) {
+        res.status(500).json({ error: "Database error during deletion: " + err.message });
+    }
+});
+
+// 4b. Walk Back Acceptance (Acceptor Only, before Initiator locks funds)
+app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
+    const id = req.params.id as string;
+    const { signature } = req.body;
+
+    if (!signature) {
+        return res.status(400).json({ error: "Missing walkback verification signature" });
+    }
+
+    try {
+        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        if (!offer) {
+            return res.status(404).json({ error: "Offer not found" });
+        }
+
+        if (offer.status !== 'ACCEPTED') {
+            return res.status(400).json({ error: "Only accepted offers that have not locked funds can walk back acceptance." });
+        }
+
+        // If b110HtlcTxid is already filled, initiator has already locked funds
+        if (offer.b110HtlcTxid) {
+            return res.status(400).json({ error: "Initiator has already funded the HTLC. Cannot walk back acceptance." });
+        }
+
+        if (!offer.acceptorPubKey) {
+            return res.status(400).json({ error: "No acceptor is currently registered on this offer." });
+        }
+
+        // Verify cryptographic signature from the acceptor
+        try {
+            const msg = `walkback-offer:${id}`;
+            const msgHash = bitcoin.crypto.sha256(Buffer.from(msg));
+            const sigBuf = Buffer.from(signature, 'hex');
+            const pubKeyBuf = Buffer.from(offer.acceptorPubKey, 'hex');
+
+            const pair = ECPair.fromPublicKey(pubKeyBuf);
+            const verified = pair.verify(msgHash, sigBuf);
+
+            if (!verified) {
+                return res.status(401).json({ error: "Invalid signature. Walk back denied." });
+            }
+        } catch (sigErr: any) {
+            return res.status(401).json({ error: "Signature verification failed: " + sigErr.message });
+        }
+
+        // Reset the offer status back to OPEN and clear acceptorPubKey
+        await dbRun(
+            "UPDATE offers SET status = 'OPEN', acceptorPubKey = NULL WHERE id = ?",
+            [id]
+        );
+
+        console.log(`[WALKBACK] Acceptor walked back their acceptance on offer #${id}. Reset to OPEN.`);
+        res.json({ success: true, message: `Successfully walked back acceptance on offer #${id}. Status reset to OPEN.` });
+    } catch (err: any) {
+        res.status(500).json({ error: "Database error during walkback: " + err.message });
+    }
 });
 
 // 5. Wallet Balance and UTXOs tracking (supports Mempool.space for Mainnet)
@@ -534,6 +709,10 @@ app.get('/api/config', (req: Request, res: Response) => {
 // Start the Express backend
 app.listen(PORT, async () => {
     console.log(`Server listening on http://localhost:${PORT}`);
+    
+    // Run database migrations on boot
+    await runMigrations();
+
     if (NETWORK_MODE === 'regtest') {
         await initNodeWallets();
     } else {

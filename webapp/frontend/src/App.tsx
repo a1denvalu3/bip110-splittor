@@ -1272,6 +1272,62 @@ export default function App() {
     }
   };
 
+  const handleDeleteOffer = async (o: Offer) => {
+    const confirmed = window.confirm(`Are you sure you want to delete and remove your Swap Offer #${o.id}?`);
+    if (!confirmed) return;
+
+    try {
+      const msg = `delete-offer:${o.id}`;
+      const msgHash = bitcoin.crypto.sha256(Buffer.from(msg));
+      
+      const pair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'));
+      const sig = pair.sign(msgHash);
+      const signature = Buffer.from(sig).toString('hex');
+
+      const res = await axios.post(`${API_BASE}/offers/${o.id}/delete`, { signature });
+      showToast(res.data.message || 'Offer deleted successfully.', 'success');
+      
+      if (selectedOffer?.id === o.id) {
+        setSelectedOffer(null);
+      }
+      
+      await fetchOffers();
+    } catch (err: any) {
+      const errMsg = err.response?.data?.error || err.message;
+      showToast(`Failed to delete offer: ${errMsg}`, 'error');
+    }
+  };
+
+  const handleWalkbackAcceptance = async (o: Offer) => {
+    const confirmed = window.confirm(`Are you sure you want to walk back your acceptance of Swap #${o.id}? The offer status will reset to OPEN.`);
+    if (!confirmed) return;
+
+    try {
+      const msg = `walkback-offer:${o.id}`;
+      const msgHash = bitcoin.crypto.sha256(Buffer.from(msg));
+      
+      const pair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'));
+      const sig = pair.sign(msgHash);
+      const signature = Buffer.from(sig).toString('hex');
+
+      const res = await axios.post(`${API_BASE}/offers/${o.id}/walkback`, { signature });
+      showToast(res.data.message || 'Acceptance walked back successfully.', 'success');
+      
+      if (selectedOffer?.id === o.id) {
+        setSelectedOffer({
+          ...selectedOffer,
+          status: 'OPEN',
+          acceptorPubKey: undefined
+        });
+      }
+
+      await fetchOffers();
+    } catch (err: any) {
+      const errMsg = err.response?.data?.error || err.message;
+      showToast(`Failed to walk back acceptance: ${errMsg}`, 'error');
+    }
+  };
+
   const handleCreateOffer = async (e: React.FormEvent) => {
     e.preventDefault();
     setPublishing(true);
@@ -3023,13 +3079,14 @@ export default function App() {
         {/* TAB 4: MY SWAPS & OPEN OFFERS */}
         {activeTab === 'my-offers' && (
           <div className="space-y-8">
+            {/* Published Swaps (You are Initiator) */}
             <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
               <h3 className="text-md font-semibold text-slate-200 flex items-center gap-2">
                 <User className="w-5 h-5 text-indigo-400" />
                 My Swaps & Open Offers (You are Initiator)
               </h3>
               <p className="text-xs text-slate-400">
-                Monitor the state of swap contracts you published and if they have been taken.
+                Monitor the state of swap contracts you published and manage deletions.
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -3057,7 +3114,7 @@ export default function App() {
                             o.status === 'ACCEPTED' ? 'bg-indigo-950/40 border-indigo-900/60 text-indigo-400 animate-pulse' :
                             'bg-emerald-950/40 border-emerald-900/60 text-emerald-400'
                           }`}>
-                            {o.isPending ? 'PENDING' : o.status === 'OPEN' ? 'OPEN (Waiting)' : o.status}
+                            {o.isPending ? 'PENDING' : o.status === 'OPEN' ? 'OPEN' : o.status}
                           </span>
                         </div>
 
@@ -3092,17 +3149,124 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="mt-5">
+                      <div className="mt-5 flex flex-col sm:flex-row gap-3">
                         <button
                           onClick={() => {
                             setSelectedOffer(o);
                             setActiveTab('wizard');
                           }}
-                          className="w-full py-2.5 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10 flex items-center justify-center gap-1.5"
+                          className="flex-1 py-2.5 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10 flex items-center justify-center gap-1.5"
                         >
                           <Activity className="w-4 h-4" />
                           Open Swap Wizard
                         </button>
+                        
+                        {(o.status === 'OPEN' || o.status === 'ACCEPTED') && (
+                          <button
+                            onClick={() => handleDeleteOffer(o)}
+                            className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/40 text-rose-300 transition-all flex items-center justify-center gap-1"
+                            title="Cancel and permanently delete this offer"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Accepted Swaps (You are Acceptor) */}
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
+              <h3 className="text-md font-semibold text-slate-200 flex items-center gap-2">
+                <UserCheck className="w-5 h-5 text-emerald-400" />
+                Swaps I Have Accepted (You are Acceptor)
+              </h3>
+              <p className="text-xs text-slate-400">
+                Monitor the swaps you accepted and coordinate escrows. You can walk back your acceptance if the initiator hasn't funded the HTLC yet.
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {offersList.filter(o => o.acceptorPubKey === publicKey).length === 0 ? (
+                  <div className="col-span-2 text-center py-12 text-slate-500 border border-dashed border-slate-800 rounded-2xl bg-slate-950/20 text-xs">
+                    You haven't accepted any swaps yet. Browse the **Marketplace Lobby** to find open offers!
+                  </div>
+                ) : (
+                  offersList.filter(o => o.acceptorPubKey === publicKey).map((o) => (
+                    <div 
+                      key={o.id} 
+                      className={`bg-slate-950 border p-5 rounded-2xl flex flex-col justify-between transition-all ${
+                        selectedOffer?.id === o.id ? 'border-indigo-500 shadow-lg shadow-indigo-500/5' : 'border-slate-850 hover:border-slate-800'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex justify-between items-start mb-4">
+                          <div>
+                            <span className="text-xs font-mono text-slate-400 block">Offer ID: #{o.id}</span>
+                            <span className="text-xs text-slate-500">Created: {new Date(o.createdAt).toLocaleTimeString()}</span>
+                          </div>
+                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${
+                            o.isPending ? 'bg-amber-950/40 border-amber-900/60 text-amber-400 animate-pulse' :
+                            o.status === 'ACCEPTED' ? 'bg-indigo-950/40 border-indigo-900/60 text-indigo-400 animate-pulse' :
+                            'bg-emerald-950/40 border-emerald-900/60 text-emerald-400'
+                          }`}>
+                            {o.isPending ? 'PENDING' : o.status}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4 mb-4 text-xs">
+                          <div>
+                            <span className="text-slate-400 block font-medium">You Receive</span>
+                            <span className="font-semibold text-sky-400">
+                              {o.backingChain === 'main' ? `${(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC` : `${(o.initiatorB110Amount / 100000000).toFixed(4)} B110`}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 block font-medium">You Spend</span>
+                            <span className="font-semibold text-emerald-400">
+                              {o.backingChain === 'main' ? `${(o.initiatorB110Amount / 100000000).toFixed(4)} B110` : `${(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC`}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
+                          <div className="flex justify-between">
+                            <span className="text-slate-500 font-medium">Refund Locktime (T/2):</span>
+                            <span className="font-semibold text-amber-500">
+                              {o.lockTime / 2} blocks (~{(((o.lockTime / 2) * 10) / 60).toFixed(1)} hrs)
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-500 font-medium">Escrow Status:</span>
+                            <span className={`font-semibold ${o.b110HtlcTxid ? 'text-emerald-400' : 'text-amber-500 animate-pulse'}`}>
+                              {o.b110HtlcTxid ? '✔️ Initiator Escrow Funded' : '⏳ Waiting for Initiator to lock funds'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-5 flex flex-col sm:flex-row gap-3">
+                        <button
+                          onClick={() => {
+                            setSelectedOffer(o);
+                            setActiveTab('wizard');
+                          }}
+                          className="flex-1 py-2.5 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10 flex items-center justify-center gap-1.5"
+                        >
+                          <Activity className="w-4 h-4" />
+                          Open Swap Wizard
+                        </button>
+                        
+                        {o.status === 'ACCEPTED' && !o.b110HtlcTxid && (
+                          <button
+                            onClick={() => handleWalkbackAcceptance(o)}
+                            className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-amber-950/40 hover:bg-amber-900/60 border border-amber-900/40 text-amber-400 transition-all flex items-center justify-center gap-1"
+                            title="Walk back acceptance and reset offer to open"
+                          >
+                            Walk Back
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))
