@@ -3028,19 +3028,34 @@ export default function App() {
                             </div>
                           </div>
 
-                          <div className="flex justify-between items-center pt-1.5 gap-4">
+                          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pt-2 gap-4 border-t border-slate-800/80 mt-2">
                             <span className="text-[10px] text-slate-500 font-medium leading-normal">
                               {isExpired 
                                 ? '✔️ Refund window is OPEN. Reclaim your funds now.' 
                                 : `⏳ Refund opens in ${targetLocktime - currentHeight} blocks (~${(((targetLocktime - currentHeight) * 10) / 60).toFixed(1)} hrs).`}
                             </span>
-                            <button
-                              onClick={executeRefund}
-                              disabled={!isExpired}
-                              className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-md transition-all whitespace-nowrap"
-                            >
-                              Reclaim Locked Funds
-                            </button>
+                            <div className="flex gap-2 w-full sm:w-auto justify-end">
+                              {networkMode === 'regtest' && !isExpired && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const blocksNeeded = targetLocktime - currentHeight;
+                                    mineBlocks(targetChain, blocksNeeded);
+                                  }}
+                                  className="px-3 py-2 bg-indigo-600/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/40 font-semibold text-xs rounded-xl transition-all whitespace-nowrap"
+                                  title={`Fast-forward by mining ${targetLocktime - currentHeight} blocks`}
+                                >
+                                  ⚡ Fast-Forward {targetLocktime - currentHeight} Blocks
+                                </button>
+                              )}
+                              <button
+                                onClick={executeRefund}
+                                disabled={!isExpired}
+                                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-md transition-all whitespace-nowrap"
+                              >
+                                Reclaim Locked Funds
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
