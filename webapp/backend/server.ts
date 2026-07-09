@@ -62,8 +62,8 @@ const rateLimiter = (limit: number, windowMs: number) => {
     };
 };
 
-// Comfortably covers client polling (max 18-20 req/min) while strictly preventing rapid API spam
-app.use('/api', rateLimiter(120, 60000));
+// Accommodates intense parallel loops from multi-index HD wallet balance scans (up to 600 req/min)
+app.use('/api', rateLimiter(600, 60000));
 
 // Parse command-line arguments and environment variables for network mode
 const args = process.argv.slice(2);
