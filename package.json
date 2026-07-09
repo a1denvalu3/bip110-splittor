@@ -8,7 +8,8 @@
     "test:split": "npx ts-node tests/regtest-split-primitive.ts",
     "test:swap": "npx ts-node tests/regtest-full-swap.ts",
     "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts",
-    "server": "docker compose up -d && npx ts-node webapp/backend/server.ts",
+    "server": "docker compose up -d && rm -f webapp/backend/bip110_swap.db && npx ts-node webapp/backend/server.ts",
+    "server:mainnet": "npx ts-node webapp/backend/server.ts --mainnet",
     "frontend": "npm run dev --prefix webapp/frontend",
     "stop": "docker compose down -v && pkill -f ts-node || true"
   },
