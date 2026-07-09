@@ -2,7 +2,10 @@ import sqlite3 from 'sqlite3';
 import path from 'path';
 
 // Store DB in the webapp directory so it persists across container rebuilds or restarts
-const dbPath = path.resolve(__dirname, '../bip110_swap.db');
+const args = process.argv.slice(2);
+const isMainnet = args.includes('--mainnet') || args.includes('--network=mainnet') || process.env.NETWORK_MODE === 'mainnet';
+const dbName = isMainnet ? 'bip110_swap_mainnet.db' : 'bip110_swap_regtest.db';
+const dbPath = path.resolve(__dirname, `../${dbName}`);
 
 export const db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
