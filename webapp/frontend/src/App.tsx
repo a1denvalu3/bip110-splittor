@@ -111,6 +111,42 @@ export default function App() {
   const [revealMasterPrivKey, setRevealMasterPrivKey] = useState<boolean>(false);
   const [recoveryDownloaded, setRecoveryDownloaded] = useState<boolean>(false);
 
+  // Custom BIP110 Node Settings State
+  const [customNode, setCustomNode] = useState<any>(() => {
+    const saved = localStorage.getItem('bip110_custom_rpc');
+    return saved ? JSON.parse(saved) : null;
+  });
+
+  const [rpcHost, setRpcHost] = useState<string>('127.0.0.1');
+  const [rpcPort, setRpcPort] = useState<string>('8332');
+  const [rpcUser, setRpcUser] = useState<string>('user');
+  const [rpcPass, setRpcPass] = useState<string>('password');
+  const [testingNode, setTestingNode] = useState<boolean>(false);
+
+  const getBip110RpcHeaders = () => {
+    if (!customNode) return {};
+    return {
+      'x-bip110-rpc-host': customNode.host,
+      'x-bip110-rpc-port': customNode.port,
+      'x-bip110-rpc-user': customNode.user,
+      'x-bip110-rpc-pass': customNode.pass
+    };
+  };
+
+  useEffect(() => {
+    if (customNode) {
+      setRpcHost(customNode.host);
+      setRpcPort(customNode.port);
+      setRpcUser(customNode.user);
+      setRpcPass(customNode.pass);
+    } else {
+      setRpcHost('127.0.0.1');
+      setRpcPort(networkMode === 'mainnet' ? '8332' : '18444');
+      setRpcUser('user');
+      setRpcPass('password');
+    }
+  }, [customNode, networkMode]);
+
   // Active derived states (at activeIndex)
   const [privateKey, setPrivateKey] = useState<string>('');
   const [publicKey, setPublicKey] = useState<string>('');
@@ -491,7 +527,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        });
+        }, { headers: getBip110RpcHeaders() });
 
         // Update Offer State on server
         const role = selectedOffer.initiatorPubKey === publicKey ? 'initiator' : 'acceptor';
@@ -991,7 +1027,7 @@ export default function App() {
 
   const fetchNodeInfo = async () => {
     try {
-      const res = await axios.get(`${API_BASE}/node/info`);
+      const res = await axios.get(`${API_BASE}/node/info`, { headers: getBip110RpcHeaders() });
       setNodeInfo({ mainHeight: res.data.mainHeight, bip110Height: res.data.bip110Height });
     } catch (err: any) {
       console.error(err);
@@ -1000,7 +1036,7 @@ export default function App() {
 
   const fetchOffers = async () => {
     try {
-      const res = await axios.get(`${API_BASE}/offers?networkMode=${networkMode}`);
+      const res = await axios.get(`${API_BASE}/offers?networkMode=${networkMode}`, { headers: getBip110RpcHeaders() });
       setOffersList(res.data);
     } catch (err: any) {
       console.error(err);
@@ -1021,20 +1057,20 @@ export default function App() {
         const childKeys = deriveKeysForIndex(masterPrivateKey, i, net);
         
         // 1. Fetch Contract UTXOs (Unsplit)
-        const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'main', networkMode });
+        const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'main', networkMode }, { headers: getBip110RpcHeaders() });
         const mainWithIndex = resMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
         aggregatedMainUtxos.push(...mainWithIndex);
 
-        const resBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'bip110', networkMode });
+        const resBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'bip110', networkMode }, { headers: getBip110RpcHeaders() });
         const bip110WithIndex = resBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
         aggregatedBip110Utxos.push(...bip110WithIndex);
 
         // 2. Fetch Own Keypath Address UTXOs (Already split)
-        const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'main', networkMode });
+        const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'main', networkMode }, { headers: getBip110RpcHeaders() });
         const ownMainWithIndex = resOwnMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
         aggregatedOwnMainUtxos.push(...ownMainWithIndex);
 
-        const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'bip110', networkMode });
+        const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'bip110', networkMode }, { headers: getBip110RpcHeaders() });
         const ownBip110WithIndex = resOwnBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
         aggregatedOwnBip110Utxos.push(...ownBip110WithIndex);
       }
@@ -1057,9 +1093,7 @@ export default function App() {
       const totalOwnBip110 = aggregatedOwnBip110Utxos.reduce((sum, u) => sum + u.amount, 0);
       setOwnBip110Balance(totalOwnBip110);
 
-      if (networkMode === 'regtest') {
-        fetchNodeInfo();
-      }
+      fetchNodeInfo();
     } catch (err: any) {
       console.error("Error fetching multi-address balances:", err);
     }
@@ -1147,7 +1181,7 @@ export default function App() {
         chain: 'main',
         networkMode,
         isSplit: true
-      });
+      }, { headers: getBip110RpcHeaders() });
 
       mainTxid = resMain.data.txid;
       mainSuccess = true;
@@ -1256,7 +1290,7 @@ export default function App() {
         hex: tx.toHex(),
         chain: targetChain,
         networkMode
-      });
+      }, { headers: getBip110RpcHeaders() });
 
       showToast(`Withdrawal successfully broadcasted on ${isMainChain ? 'Bitcoin Core' : 'BIP110-Chain'}! TxID: ${broadcastRes.data.txid}`, 'success');
       
@@ -1549,7 +1583,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        });
+        }, { headers: getBip110RpcHeaders() });
 
         // 5. Update Offer State on server
         const updateParams: any = {
@@ -1671,7 +1705,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        });
+        }, { headers: getBip110RpcHeaders() });
 
         // 5. Update Offer State on server
         const updateParams: any = {
@@ -1770,11 +1804,11 @@ export default function App() {
         );
 
         // Broadcast raw tx
-        const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
+        await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        });
+        }, { headers: getBip110RpcHeaders() });
 
         // Update Offer State on server
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
@@ -1857,7 +1891,7 @@ export default function App() {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
-        });
+        }, { headers: getBip110RpcHeaders() });
 
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
           status: 'CLAIMED',
@@ -1878,6 +1912,41 @@ export default function App() {
     navigator.clipboard.writeText(text);
     showToast('Copied to clipboard!', 'success');
   };
+
+  const testAndConnectNode = async () => {
+    setTestingNode(true);
+    try {
+      const headers = {
+        'x-bip110-rpc-host': rpcHost,
+        'x-bip110-rpc-port': rpcPort,
+        'x-bip110-rpc-user': rpcUser,
+        'x-bip110-rpc-pass': rpcPass
+      };
+
+      const res = await axios.get(`${API_BASE}/node/info`, { headers });
+      
+      const config = { host: rpcHost, port: rpcPort, user: rpcUser, pass: rpcPass };
+      setCustomNode(config);
+      localStorage.setItem('bip110_custom_rpc', JSON.stringify(config));
+
+      showToast(`Connected successfully! Custom BIP110 node is at block #${res.data.bip110Height}.`, 'success');
+      await fetchBalances();
+    } catch (err: any) {
+      const errMsg = err.response?.data?.error || err.message;
+      showToast(`Failed to connect to BIP110 node: ${errMsg}`, 'error');
+    } finally {
+      setTestingNode(false);
+    }
+  };
+
+  const disconnectNode = () => {
+    setCustomNode(null);
+    localStorage.removeItem('bip110_custom_rpc');
+    showToast('Disconnected custom BIP110 node. Reverted to default.', 'info');
+  };
+
+  const blockLead = nodeInfo.mainHeight - nodeInfo.bip110Height;
+  const isLockoutActive = nodeInfo.mainHeight > 0 && nodeInfo.bip110Height > 0 && blockLead > 0 && blockLead < 10;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -2037,7 +2106,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-8 w-full">
-        {nodeInfo.mainHeight > 0 && nodeInfo.mainHeight < nodeInfo.bip110Height + 10 ? (
+        {isLockoutActive ? (
           <div className="bg-slate-900/50 border border-amber-900/40 rounded-3xl p-8 md:p-12 shadow-2xl flex flex-col items-center text-center space-y-6 max-w-3xl mx-auto backdrop-blur-sm mt-8 animate-fade-in">
             <div className="w-16 h-16 rounded-2xl bg-amber-950/40 border border-amber-500/50 flex items-center justify-center shadow-lg shadow-amber-500/10">
               <AlertTriangle className="w-8 h-8 text-amber-500 animate-bounce" />
@@ -2310,6 +2379,111 @@ export default function App() {
                       <span className="text-[10px] text-slate-500">Supports .json files generated by splittoooor</span>
                     </label>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            {/* BIP110 Custom RPC Node Connection Card */}
+            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
+              <div>
+                <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
+                  <Globe className="w-5 h-5 text-sky-400" />
+                  BIP110 Knots Node RPC Settings
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  {networkMode === 'mainnet' 
+                    ? "⚠️ REQUIRED FOR PRODUCTION: Since BIP110 is a consensus subset, you cannot broadcast BIP110 transactions on the Main-Chain. You must connect your own local or remote BIP110 Knots node RPC to load balances, track confirmations, and broadcast transactions on the BIP110 chain."
+                    : "Simulated Custom RPC connection settings. You can target any custom Regtest or local Knots RPC node here if desired."}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider mb-2">Node Host / IP</label>
+                  <input
+                    type="text"
+                    value={rpcHost}
+                    onChange={(e) => setRpcHost(e.target.value)}
+                    placeholder="e.g. 127.0.0.1"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider mb-2">RPC Port</label>
+                  <input
+                    type="text"
+                    value={rpcPort}
+                    onChange={(e) => setRpcPort(e.target.value)}
+                    placeholder={networkMode === 'mainnet' ? "8332" : "18444"}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider mb-2">RPC Username</label>
+                  <input
+                    type="text"
+                    value={rpcUser}
+                    onChange={(e) => setRpcUser(e.target.value)}
+                    placeholder="e.g. user"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider mb-2">RPC Password</label>
+                  <input
+                    type="password"
+                    value={rpcPass}
+                    onChange={(e) => setRpcPass(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t border-slate-850">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-slate-400">Node Status:</span>
+                  {customNode ? (
+                    <span className="text-xs font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2.5 py-0.5 rounded-full flex items-center gap-1 font-mono">
+                      <Check className="w-3.5 h-3.5" />
+                      CONNECTED ({customNode.host}:{customNode.port})
+                    </span>
+                  ) : (
+                    <span className="text-xs font-bold text-slate-500 bg-slate-900/80 border border-slate-800 px-2.5 py-0.5 rounded-full uppercase">
+                      OFFLINE (Default Fallback)
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex gap-3 w-full sm:w-auto">
+                  {customNode && (
+                    <button
+                      onClick={disconnectNode}
+                      className="px-4 py-2 text-xs font-semibold text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-950/40 border border-rose-900/40 rounded-xl transition-all w-full sm:w-auto"
+                    >
+                      Disconnect Node
+                    </button>
+                  )}
+                  <button
+                    onClick={testAndConnectNode}
+                    disabled={testingNode}
+                    className="px-5 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-sky-600/10 w-full sm:w-auto"
+                  >
+                    {testingNode ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        Connecting...
+                      </>
+                    ) : (
+                      <>
+                        <Globe className="w-3.5 h-3.5" />
+                        Connect & Verify Node
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             </div>
