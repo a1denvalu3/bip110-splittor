@@ -640,7 +640,7 @@ export default function App() {
     }
   }, [splitAddress, ownAddress, activeTab, networkMode]);
 
-  // Poll node info, marketplace offers, and wallet balances/UTXOs every 3 seconds for active, real-time updates
+  // Poll node info, marketplace offers, and wallet balances/UTXOs every 10 seconds for active, real-time updates
   useEffect(() => {
     const interval = setInterval(() => {
       fetchNodeInfo();
@@ -648,7 +648,7 @@ export default function App() {
       if (splitAddress && ownAddress) {
         fetchBalances();
       }
-    }, 3000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, [networkMode, splitAddress, ownAddress]);

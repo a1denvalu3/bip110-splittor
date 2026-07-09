@@ -8,6 +8,45 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
+// In-memory rate-limiter database and middleware
+const rateLimitDb: Record<string, { count: number; resetTime: number }> = {};
+const rateLimiter = (limit: number, windowMs: number) => {
+    return (req: Request, res: Response, next: any) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+        const now = Date.now();
+        
+        if (!rateLimitDb[ip]) {
+            rateLimitDb[ip] = {
+                count: 1,
+                resetTime: now + windowMs
+            };
+            return next();
+        }
+        
+        const record = rateLimitDb[ip];
+        if (now > record.resetTime) {
+            record.count = 1;
+            record.resetTime = now + windowMs;
+            return next();
+        }
+        
+        record.count++;
+        if (record.count > limit) {
+            const secsLeft = Math.ceil((record.resetTime - now) / 1000);
+            res.setHeader('Retry-After', String(secsLeft));
+            res.status(429).json({
+                error: `Too many requests. Please slow down. Retry in ${secsLeft} seconds.`
+            });
+            return;
+        }
+        
+        next();
+    };
+};
+
+// Comfortably covers client polling (max 18-20 req/min) while strictly preventing rapid API spam
+app.use('/api', rateLimiter(120, 60000));
+
 // Parse command-line arguments and environment variables for network mode
 const args = process.argv.slice(2);
 const NETWORK_MODE: 'mainnet' | 'regtest' = 
