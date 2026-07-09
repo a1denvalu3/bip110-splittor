@@ -98,6 +98,37 @@ npm run test:refund
 
 ---
 
+## Running the Interactive WebApp (Regtest Simulation)
+
+You can run the full-stack interactive atomic swap web application locally to test and simulate splits, orders, claims, and refunds via a premium web UI.
+
+### 1. Boot up the Nodes & Backend Server
+This command will spin up the docker containers (Core + Knots), wipe any previous regtest DB to start fresh from zero, and launch the Express backend on port `4000`:
+```bash
+npm run server
+```
+
+### 2. Start the Frontend Client
+This command will start the Vite React development server:
+```bash
+npm run frontend
+```
+
+### 3. Open the Web Portal
+Once both services are running, open your web browser and navigate to:
+```
+http://localhost:5173
+```
+
+* **Step-by-Step Simulation Guide**:
+  1. **Tab 1: Unified Wallet & Coin Faucet**: Generate mature coinbase miner rewards and activate the BIP110 consensus split natively by clicking **"Mine 450 blocks"**. Next, deposit test coins to your derived P2TR split contract address using the **Core and Knots faucets**.
+  2. **Tab 2: Bilateral Splitter**: Select your deposited unsplit UTXO. Download your master seed recovery backup file to unlock features, then click **"Split Coins (Scriptpath Spend)"** to execute a split transaction (accepted on Bitcoin Core but rejected on Knots, cleanly isolating your BIP110 coins).
+  3. **Tab 3: Marketplace Lobby**: Publish a swap offer to sell your isolated BIP110 coins in exchange for Mainnet BTC, customized with custom premiums or discounts.
+  4. **Tab 4: My Swaps & Offers**: Monitor your listings, delete outstanding listings, walk back acceptances, or accept your own listing as a counterparty (by generating a new active P2TR address in Tab 1!).
+  5. **Tab 5: Swap Wizard**: Orchestrate the end-to-end atomic swap using the step-by-step visual workflow to fund escrows, extract revealed preimages, settle claims, or simulate expired refund scripts.
+
+---
+
 ## References
 
 * **Formalized Scheme Specification Gist**: [Double-Sided Replay-Protected Atomic Swap Gist](https://gist.github.com/a1denvalu3/7641b514bdb3b9de1b0f87a96c19cbf4)
