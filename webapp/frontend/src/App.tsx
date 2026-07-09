@@ -990,7 +990,6 @@ export default function App() {
   };
 
   const fetchNodeInfo = async () => {
-    if (networkMode === 'mainnet') return;
     try {
       const res = await axios.get(`${API_BASE}/node/info`);
       setNodeInfo({ mainHeight: res.data.mainHeight, bip110Height: res.data.bip110Height });
@@ -2038,7 +2037,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-8 w-full">
-        {networkMode === 'regtest' && nodeInfo.mainHeight < nodeInfo.bip110Height + 10 ? (
+        {nodeInfo.mainHeight > 0 && nodeInfo.mainHeight < nodeInfo.bip110Height + 10 ? (
           <div className="bg-slate-900/50 border border-amber-900/40 rounded-3xl p-8 md:p-12 shadow-2xl flex flex-col items-center text-center space-y-6 max-w-3xl mx-auto backdrop-blur-sm mt-8 animate-fade-in">
             <div className="w-16 h-16 rounded-2xl bg-amber-950/40 border border-amber-500/50 flex items-center justify-center shadow-lg shadow-amber-500/10">
               <AlertTriangle className="w-8 h-8 text-amber-500 animate-bounce" />
@@ -2070,18 +2069,24 @@ export default function App() {
               </div>
             </div>
 
-            <div className="pt-6 w-full max-w-xs">
-              <button
-                onClick={() => mineBlocks('main', 10)}
-                className="w-full py-3 bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500 text-white font-semibold text-sm rounded-xl shadow-xl shadow-indigo-600/10 transition-all flex items-center justify-center gap-2 group"
-              >
-                <Sparkles className="w-4 h-4 text-amber-300 group-hover:scale-110 transition-transform animate-pulse" />
-                Mine +10 Blocks on Bitcoin Core
-              </button>
-              <span className="text-[10px] text-slate-500 block mt-2.5 leading-normal">
-                Click to instantly mine 10 blocks on Core via local RPC, establishing the required work advantage and unlocking the portal.
-              </span>
-            </div>
+            {networkMode === 'regtest' ? (
+              <div className="pt-6 w-full max-w-xs">
+                <button
+                  onClick={() => mineBlocks('main', 10)}
+                  className="w-full py-3 bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500 text-white font-semibold text-sm rounded-xl shadow-xl shadow-indigo-600/10 transition-all flex items-center justify-center gap-2 group"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-300 group-hover:scale-110 transition-transform animate-pulse" />
+                  Mine +10 Blocks on Bitcoin Core
+                </button>
+                <span className="text-[10px] text-slate-500 block mt-2.5 leading-normal">
+                  Click to instantly mine 10 blocks on Core via local RPC, establishing the required work advantage and unlocking the portal.
+                </span>
+              </div>
+            ) : (
+              <div className="pt-6 bg-slate-950/40 border border-slate-800 p-4 rounded-2xl max-w-md text-xs text-slate-400 leading-relaxed">
+                🛡️ <strong>Production Safety Hold:</strong> The system is waiting for the Main-Chain (Bitcoin Core) to extend its cumulative proof-of-work lead. The interface will automatically restore functionality as soon as the Main-Chain establishes a strict 10-block lead.
+              </div>
+            )}
           </div>
         ) : (
           <>
