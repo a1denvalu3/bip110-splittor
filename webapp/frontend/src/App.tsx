@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from '@bitcoinerlab/secp256k1';
@@ -102,6 +102,9 @@ export default function App() {
   const [masterPrivateKey, setMasterPrivateKey] = useState<string>('');
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [maxIndex, setMaxIndex] = useState<number>(0);
+
+  // Polling History Ref for Change Detection Notifications
+  const prevOffersRef = useRef<Offer[]>([]);
 
   // Active derived states (at activeIndex)
   const [privateKey, setPrivateKey] = useState<string>('');
@@ -617,6 +620,141 @@ export default function App() {
     console.log(`[CHANGE-DERIVATION] Generated fresh change address at index #${nextMaxIndex + 1}: ${childKeys.ownAddress}`);
     return childKeys.ownAddress;
   };
+
+  // Web Audio API Synthesizer: pleasant two-tone platform chime (D5 to A5 notes)
+  const playNotificationChime = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5 note
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1); // A5 note
+      
+      gain.gain.setValueAtTime(0.04, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.45);
+      
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.45);
+    } catch (err) {
+      console.warn("Web Audio API chime blocked by browser autoplay policy:", err);
+    }
+  };
+
+  // Triggers HTML5 System Desktop Notifications and plays the chime
+  const sendSystemNotification = (title: string, body: string) => {
+    playNotificationChime();
+    
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      try {
+        new Notification(title, {
+          body,
+          tag: 'bip110-swap-portal'
+        });
+      } catch (e) {
+        console.error("System notification failed to spawn:", e);
+      }
+    }
+  };
+
+  // Request HTML5 Notifications permission on startup
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'default') {
+        Notification.requestPermission().then(permission => {
+          if (permission === 'granted') {
+            console.log("Desktop notifications permission granted.");
+          }
+        });
+      }
+    }
+  }, []);
+
+  // Monitor offersList changes and dispatch real-time notifications
+  useEffect(() => {
+    if (!offersList || offersList.length === 0) {
+      prevOffersRef.current = offersList || [];
+      return;
+    }
+
+    const prevOffers = prevOffersRef.current;
+    if (prevOffers && prevOffers.length > 0 && publicKey) {
+      // 1. Detect New Offers published by counterparties
+      offersList.forEach(o => {
+        const wasPresent = prevOffers.some(p => p.id === o.id);
+        const isNotOurs = o.initiatorPubKey !== publicKey;
+        
+        if (!wasPresent && isNotOurs) {
+          sendSystemNotification(
+            "New Swap Offer Open",
+            `Marketplace: #${o.id} is selling ${(o.initiatorB110Amount / 100000000).toFixed(4)} B110 for ${(o.acceptorBtcAmount / 100000000).toFixed(4)} BTC.`
+          );
+        }
+      });
+
+      // 2. Detect Existing Offers status transitions or field updates
+      offersList.forEach(o => {
+        const prev = prevOffers.find(p => p.id === o.id);
+        if (prev) {
+          const isParticipant = o.initiatorPubKey === publicKey || o.acceptorPubKey === publicKey;
+          const isWeInitiator = o.initiatorPubKey === publicKey;
+
+          if (isParticipant) {
+            // Status updated
+            if (o.status !== prev.status) {
+              let title = `Swap #${o.id} Progressed`;
+              let text = `Status updated to ${o.status}`;
+              
+              if (o.status === 'ACCEPTED') {
+                title = "Swap Offer Accepted!";
+                text = `A counterparty has accepted your Swap #${o.id}. Proceed to fund HTLC.`;
+              } else if (o.status === 'FUNDED_INITIATOR') {
+                title = "Initiator Escrow Locked";
+                text = `The Initiator has locked coins for Swap #${o.id}. Verify and fund your escrow now.`;
+              } else if (o.status === 'FUNDED_ACCEPTOR') {
+                title = "Acceptor Escrow Locked";
+                text = `The Acceptor has locked coins for Swap #${o.id}. You can now claim yours!`;
+              } else if (o.status === 'CLAIMED') {
+                title = "Swap Settled Successfully!";
+                text = `All contract escrow claims are complete for Swap #${o.id}.`;
+              } else if (o.status === 'REFUNDED') {
+                title = "Swap Aborted & Refunded";
+                text = `Escrow timelocks expired and coins were reclaimed for Swap #${o.id}.`;
+              }
+
+              sendSystemNotification(title, text);
+            }
+            
+            // Preimage revealed
+            else if (o.preimage !== prev.preimage && o.preimage && !isWeInitiator) {
+              sendSystemNotification(
+                "Preimage Revealed!",
+                `The Initiator has claimed BTC, revealing preimage "${o.preimage}". Claim your B110 coins now!`
+              );
+            }
+
+            // Acceptor claimed B110
+            else if (o.acceptorClaimed !== prev.acceptorClaimed && o.acceptorClaimed && isWeInitiator) {
+              sendSystemNotification(
+                "Swap Completed!",
+                `The Acceptor has extracted the preimage and successfully claimed their B110 coins.`
+              );
+            }
+          }
+        }
+      });
+    }
+
+    // Keep history ref updated
+    prevOffersRef.current = offersList;
+  }, [offersList, publicKey]);
 
   // Load saved master key and active/max index pointers from LocalStorage on mount or networkMode change
   useEffect(() => {
