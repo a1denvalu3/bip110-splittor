@@ -1926,7 +1926,8 @@ export default function App() {
                   }`}
                 >
                   <Flame className="w-3.5 h-3.5" />
-                  Simulation (Regtest)
+                  <span className="hidden xs:inline">Simulation (Regtest)</span>
+                  <span className="xs:hidden">Regtest</span>
                 </button>
                 <button
                   onClick={() => setNetworkMode('mainnet')}
@@ -1937,7 +1938,8 @@ export default function App() {
                   }`}
                 >
                   <Globe className="w-3.5 h-3.5" />
-                  Production (Mainnet)
+                  <span className="hidden xs:inline">Production (Mainnet)</span>
+                  <span className="xs:hidden">Mainnet</span>
                 </button>
               </div>
             ) : (
@@ -1945,12 +1947,14 @@ export default function App() {
                 {networkMode === 'regtest' ? (
                   <div className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 text-indigo-400 bg-slate-900/40 border border-slate-800">
                     <Flame className="w-3.5 h-3.5 animate-pulse" />
-                    SIMULATION (REGTEST MODE)
+                    <span className="hidden xs:inline">SIMULATION (REGTEST MODE)</span>
+                    <span className="xs:hidden">REGTEST</span>
                   </div>
                 ) : (
                   <div className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 text-amber-400 bg-amber-500/10 border border-amber-500/20">
                     <Lock className="w-3.5 h-3.5" />
-                    PRODUCTION (MAINNET MODE)
+                    <span className="hidden xs:inline">PRODUCTION (MAINNET MODE)</span>
+                    <span className="xs:hidden">MAINNET</span>
                   </div>
                 )}
               </div>
@@ -1992,7 +1996,8 @@ export default function App() {
             ) : (
               <div className="flex items-center gap-1 bg-amber-950/40 border border-amber-900/50 px-3 py-1.5 rounded-xl text-amber-400 font-bold text-xs shadow-sm">
                 <Lock className="w-3.5 h-3.5" />
-                MAINNET PRODUCTION
+                <span className="hidden xs:inline">MAINNET PRODUCTION</span>
+                <span className="xs:hidden">MAINNET</span>
               </div>
             )}
 
@@ -3795,7 +3800,7 @@ export default function App() {
                                 ? '✔️ Refund window is OPEN. Reclaim your funds now.' 
                                 : `⏳ Refund opens in ${targetLocktime - currentHeight} blocks (~${(((targetLocktime - currentHeight) * 10) / 60).toFixed(1)} hrs).`}
                             </span>
-                            <div className="flex gap-2 w-full sm:w-auto justify-end">
+                            <div className="flex flex-wrap sm:flex-nowrap gap-2 w-full sm:w-auto justify-end">
                               {networkMode === 'regtest' && !isExpired && (
                                 <button
                                   type="button"
