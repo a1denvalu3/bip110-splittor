@@ -470,7 +470,7 @@ export class PureBitcoinSwap {
                 tx.setWitness(0, [sig]);
             }
         } else {
-            // Simple P2TR Keypath spend from ownAddress
+            // Simple P2TR Keypath spend from ownAddress (requires standard TapTweak committing to empty script root)
             const ownPayment = bitcoin.payments.p2tr({
                 internalPubkey: this.getXOnlyPubKey(pubKey),
                 network
@@ -479,8 +479,8 @@ export class PureBitcoinSwap {
             const sighash = tx.hashForWitnessV1(
                 0, [ownPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
             );
-            const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
-            const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
+            const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, Buffer.alloc(0), network);
+            const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
             tx.setWitness(0, [sig]);
         }
 
