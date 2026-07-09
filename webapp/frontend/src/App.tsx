@@ -2437,75 +2437,75 @@ export default function App() {
               </div>
             </div>
 
-            {/* BIP110 Custom Explorer Settings Card */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
-              <div>
-                <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                  <Globe className="w-5 h-5 text-sky-400" />
-                  BIP110 Knots Explorer Settings
-                </h3>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  {networkMode === 'mainnet' 
-                    ? "⚠️ REQUIRED FOR PRODUCTION: Since BIP110 is a consensus subset, you cannot broadcast BIP110 transactions on the Main-Chain. You must connect a Mempool.space-compatible Explorer API running on a Knots+BIP110 node to load balances, track confirmations, and broadcast transactions safely."
-                    : "Simulated Custom Explorer connection settings. You can target any custom Mempool.space-compatible Explorer API URL here if desired."}
-                </p>
-              </div>
-
-              <div>
-                <label className="text-[10px] font-bold text-slate-500 block uppercase mb-1.5">Custom Explorer API URL</label>
-                <input
-                  type="text"
-                  value={explorerInput}
-                  onChange={(e) => setExplorerInput(e.target.value)}
-                  placeholder="https://mempool.bip110.space"
-                  className="w-full sm:w-1/2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
-                />
-              </div>
-
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t border-slate-850">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-slate-400">Explorer Status:</span>
-                  {customExplorer ? (
-                    <span className="text-xs font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2.5 py-0.5 rounded-full flex items-center gap-1 font-mono">
-                      <Check className="w-3.5 h-3.5" />
-                      CONNECTED ({customExplorer})
-                    </span>
-                  ) : (
-                    <span className="text-xs font-bold text-slate-500 bg-slate-900/80 border border-slate-800 px-2.5 py-0.5 rounded-full uppercase">
-                      OFFLINE (Default Fallback)
-                    </span>
-                  )}
+            {/* BIP110 Custom Explorer Settings Card (Only needed in production Mainnet environment) */}
+            {networkMode === 'mainnet' && (
+              <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
+                <div>
+                  <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
+                    <Globe className="w-5 h-5 text-sky-400" />
+                    BIP110 Knots Explorer Settings
+                  </h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    ⚠️ REQUIRED FOR PRODUCTION: Since BIP110 is a consensus subset, you cannot broadcast BIP110 transactions on the Main-Chain. You must connect a Mempool.space-compatible Explorer API running on a Knots+BIP110 node to load balances, track confirmations, and broadcast transactions safely.
+                  </p>
                 </div>
 
-                <div className="flex gap-3 w-full sm:w-auto">
-                  {customExplorer && (
-                    <button
-                      onClick={disconnectNode}
-                      className="px-4 py-2 text-xs font-semibold text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-950/40 border border-rose-900/40 rounded-xl transition-all w-full sm:w-auto"
-                    >
-                      Disconnect Explorer
-                    </button>
-                  )}
-                  <button
-                    onClick={testAndConnectNode}
-                    disabled={testingExplorer}
-                    className="px-5 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-sky-600/10 w-full sm:w-auto"
-                  >
-                    {testingExplorer ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        Connecting...
-                      </>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 block uppercase mb-1.5">Custom Explorer API URL</label>
+                  <input
+                    type="text"
+                    value={explorerInput}
+                    onChange={(e) => setExplorerInput(e.target.value)}
+                    placeholder="https://mempool.bip110.space"
+                    className="w-full sm:w-1/2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
+                  />
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t border-slate-850">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-slate-400">Explorer Status:</span>
+                    {customExplorer ? (
+                      <span className="text-xs font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-900/60 px-2.5 py-0.5 rounded-full flex items-center gap-1 font-mono">
+                        <Check className="w-3.5 h-3.5" />
+                        CONNECTED ({customExplorer})
+                      </span>
                     ) : (
-                      <>
-                        <Globe className="w-3.5 h-3.5" />
-                        Connect & Verify Explorer
-                      </>
+                      <span className="text-xs font-bold text-slate-500 bg-slate-900/80 border border-slate-800 px-2.5 py-0.5 rounded-full uppercase">
+                        OFFLINE
+                      </span>
                     )}
-                  </button>
+                  </div>
+
+                  <div className="flex gap-3 w-full sm:w-auto">
+                    {customExplorer && (
+                      <button
+                        onClick={disconnectNode}
+                        className="px-4 py-2 text-xs font-semibold text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-950/40 border border-rose-900/40 rounded-xl transition-all w-full sm:w-auto"
+                      >
+                        Disconnect Explorer
+                      </button>
+                    )}
+                    <button
+                      onClick={testAndConnectNode}
+                      disabled={testingExplorer}
+                      className="px-5 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-sky-600/10 w-full sm:w-auto"
+                    >
+                      {testingExplorer ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          Connecting...
+                        </>
+                      ) : (
+                        <>
+                          <Globe className="w-3.5 h-3.5" />
+                          Connect & Verify Explorer
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Faucet Card (Regtest only) OR Production Instructions Card */}
             {networkMode === 'regtest' ? (
