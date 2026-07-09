@@ -2822,6 +2822,7 @@ export default function App() {
                       const utxo = getActiveStepUtxo(2);
                       const isInitiator = selectedOffer.initiatorPubKey === publicKey;
                       const bgClass = isBtcBacking ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-sky-600 hover:bg-sky-500';
+                      const isUtxoUnconfirmed = utxo && utxo.confirmations < 1;
 
                       if (isInitiator) {
                         return (
@@ -2837,12 +2838,18 @@ export default function App() {
                                   Address: {utxo.address || 'Split contract / ownAddress'}
                                 </p>
                               )}
+                              {isUtxoUnconfirmed && (
+                                <p className="text-[10px] text-amber-500 font-semibold mt-2.5 bg-amber-950/20 border border-amber-900/40 p-2.5 rounded-lg leading-normal">
+                                  ⚠️ Your split transaction is still unconfirmed (0 confirmations). Please wait or mine a block to confirm it before locking your coins!
+                                </p>
+                              )}
                             </div>
                             <button
                               onClick={() => runWizardStep(2)}
-                              className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center ${bgClass}`}
+                              disabled={isUtxoUnconfirmed}
+                              className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${bgClass}`}
                             >
-                              Lock & Fund {isBtcBacking ? 'BTC' : 'B110'} HTLC
+                              {isUtxoUnconfirmed ? 'Awaiting Split Confirmation...' : `Lock & Fund ${isBtcBacking ? 'BTC' : 'B110'} HTLC`}
                             </button>
                           </div>
                         );
@@ -2867,6 +2874,9 @@ export default function App() {
                       const utxo = getActiveStepUtxo(3);
                       const isInitiator = selectedOffer.initiatorPubKey === publicKey;
                       const bgClass = isBtcBacking ? 'bg-sky-600 hover:bg-sky-500' : 'bg-emerald-600 hover:bg-emerald-500';
+                      const isInitiatorPending = selectedOffer.isPending;
+                      const isUtxoUnconfirmed = utxo && utxo.confirmations < 1;
+                      const cannotProceed = isInitiatorPending || isUtxoUnconfirmed;
 
                       if (!isInitiator) {
                         return (
@@ -2882,12 +2892,23 @@ export default function App() {
                                   Address: {utxo.address || 'Split contract / ownAddress'}
                                 </p>
                               )}
+                              {isInitiatorPending && (
+                                <p className="text-[10px] text-amber-500 font-semibold mt-2.5 bg-amber-950/20 border border-amber-900/40 p-2.5 rounded-lg leading-normal">
+                                  ⚠️ Initiator's HTLC escrow transaction is still unconfirmed (0 confirmations). To prevent transaction replacement/cancellation, please wait until their transaction is mined in a block!
+                                </p>
+                              )}
+                              {!isInitiatorPending && isUtxoUnconfirmed && (
+                                <p className="text-[10px] text-amber-500 font-semibold mt-2.5 bg-amber-950/20 border border-amber-900/40 p-2.5 rounded-lg leading-normal">
+                                  ⚠️ Your split transaction is still unconfirmed (0 confirmations). Please wait or mine a block to confirm it first.
+                                </p>
+                              )}
                             </div>
                             <button
                               onClick={() => runWizardStep(3)}
-                              className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center ${bgClass}`}
+                              disabled={cannotProceed}
+                              className={`px-4 py-2 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${bgClass}`}
                             >
-                              Lock & Fund {isBtcBacking ? 'B110' : 'BTC'} HTLC
+                              {isInitiatorPending ? 'Awaiting Initiator\'s Escrow...' : isUtxoUnconfirmed ? 'Awaiting Split Confirmation...' : `Lock & Fund ${isBtcBacking ? 'B110' : 'BTC'} HTLC`}
                             </button>
                           </div>
                         );
@@ -2910,19 +2931,29 @@ export default function App() {
                     {selectedOffer.status === 'FUNDED_ACCEPTOR' && (() => {
                       const isBtcBacking = selectedOffer.backingChain === 'main';
                       const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+                      const isAcceptorPending = selectedOffer.isPending;
 
                       if (isInitiator) {
                         return (
-                          <div className="bg-slate-950 border border-slate-850 p-4 rounded-xl flex justify-between items-center">
+                          <div className="bg-slate-950 border border-slate-850 p-5 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                             <div>
                               <span className="text-[10px] text-slate-500 block uppercase tracking-wider font-bold">Pending Action (Initiator)</span>
-                              <h4 className="text-xs font-bold text-slate-200">Initiator Claims {isBtcBacking ? 'B110' : 'BTC'} (Revealing Preimage)</h4>
+                              <h4 className="text-xs font-bold text-slate-200">Claim {isBtcBacking ? 'B110' : 'Bitcoin'} Coins from Escrow</h4>
+                              <p className="text-[10px] text-slate-400 leading-normal mt-1">
+                                Collect your funds from the {isBtcBacking ? 'BIP110-Chain' : 'Main-Chain'} HTLC escrow contract. This action will automatically write the secret preimage to the public blockchain, enabling the Acceptor to claim their coins.
+                              </p>
+                              {isAcceptorPending && (
+                                <p className="text-[10px] text-amber-500 font-semibold mt-2.5 bg-amber-950/20 border border-amber-900/40 p-2.5 rounded-lg leading-normal">
+                                  ⚠️ Acceptor's HTLC escrow transaction is still unconfirmed (0 confirmations). To ensure absolute transaction safety, you can only claim once their transaction is mined in a block!
+                                </p>
+                              )}
                             </div>
                             <button
                               onClick={() => runWizardStep(4)}
-                              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
+                              disabled={isAcceptorPending}
+                              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-md transition-all self-end md:self-center whitespace-nowrap"
                             >
-                              Claim {isBtcBacking ? 'B110' : 'BTC'} (Reveal Secret)
+                              {isAcceptorPending ? 'Awaiting Confirmation...' : `Claim ${isBtcBacking ? 'B110' : 'BTC'} (Reveal Secret)`}
                             </button>
                           </div>
                         );
