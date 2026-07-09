@@ -241,21 +241,20 @@ export class PureBitcoinSwap {
         splitDestPayment: bitcoin.payments.Payment,
         merkleRoot: Buffer = Buffer.alloc(0),
         changeAddr?: string,
+        feeSats: bigint = 5000n,
         network: bitcoin.Network = bitcoin.networks.regtest
     ): bitcoin.Transaction {
         const tx = new bitcoin.Transaction();
         tx.version = 2;
         tx.addInput(Buffer.from(splitTxid, 'hex').reverse(), outputIndex);
         
-        // Ensure there is always a fee of at least 5000 satoshis paid to the network
-        const fee = BigInt(5000);
         let finalOutputSats = outputSats;
-        let changeSats = inputSats - finalOutputSats - fee;
+        let changeSats = inputSats - finalOutputSats - feeSats;
 
         if (changeSats < 0n) {
             // No change output can be created, so we must reduce the HTLC funding output amount
             // to pay the minimum transaction fee from the input!
-            finalOutputSats = inputSats - fee;
+            finalOutputSats = inputSats - feeSats;
             changeSats = 0n;
         }
 
@@ -417,19 +416,19 @@ export class PureBitcoinSwap {
         isSplitAddress: boolean,
         isMainChain: boolean,
         changeAddress?: string,
+        feeSats: bigint = 5000n,
         network: bitcoin.Network = bitcoin.networks.regtest
     ): bitcoin.Transaction {
         const tx = new bitcoin.Transaction();
         tx.version = 2;
         tx.addInput(Buffer.from(txid, 'hex').reverse(), vout);
 
-        const fee = BigInt(5000);
         let finalWithdrawSats = withdrawSats;
-        let changeSats = inputSats - finalWithdrawSats - fee;
+        let changeSats = inputSats - finalWithdrawSats - feeSats;
 
         if (changeSats < 0n) {
             // Adjust output amount to fit within input minus fee
-            finalWithdrawSats = inputSats - fee;
+            finalWithdrawSats = inputSats - feeSats;
             changeSats = 0n;
         }
 

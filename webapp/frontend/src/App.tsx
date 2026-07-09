@@ -520,6 +520,79 @@ export default function App() {
     return ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network });
   };
 
+  // Dynamically calculate transaction fee in Satoshis depending on active network mode
+  const calculateTxFee = async (txType: 'split-script' | 'split-keypath' | 'funding' | 'claim' | 'refund' | 'withdraw', hasChange: boolean = false): Promise<number> => {
+    if (networkMode === 'regtest') {
+      // For regtest, we continue with standard hardcoded values for simplicity and reliability in local environments
+      if (txType === 'funding') return 5000;
+      if (txType === 'claim') return 2000;
+      if (txType === 'refund') return 2000;
+      if (txType === 'withdraw') return 5000;
+      return 2000; // split-script / split-keypath
+    }
+
+    // Mainnet Mode: Fetch feerate from mempool.space with min(5, rate) safety margin
+    try {
+      const res = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 3000 });
+      const mempoolRate = Number(res.data.halfHourFee || res.data.hourFee || 10);
+      const safetyMargin = Math.min(5, mempoolRate);
+      const finalRate = mempoolRate + safetyMargin;
+
+      let vBytes = 150; // Default fallback size
+      switch (txType) {
+        case 'split-script':
+          vBytes = 130;
+          break;
+        case 'split-keypath':
+          vBytes = 115;
+          break;
+        case 'funding':
+          vBytes = hasChange ? 160 : 115;
+          break;
+        case 'claim':
+          vBytes = 155;
+          break;
+        case 'refund':
+          vBytes = 140;
+          break;
+        case 'withdraw':
+          vBytes = hasChange ? 180 : 130;
+          break;
+      }
+
+      // Calculate total fee in satoshis
+      const feeSats = Math.ceil(vBytes * finalRate);
+      console.log(`[FEE-CALC] Mainnet Feerate: ${finalRate} sats/vB (including safety margin). TxType: ${txType}, size: ${vBytes} vB. Fee: ${feeSats} sats.`);
+      return feeSats;
+    } catch (err) {
+      console.warn("Mempool.space API unavailable. Falling back to safe fee rate of 15 sats/vB:", err);
+      let vBytes = 150;
+      switch (txType) {
+        case 'split-script': vBytes = 130; break;
+        case 'split-keypath': vBytes = 115; break;
+        case 'funding': vBytes = hasChange ? 160 : 115; break;
+        case 'claim': vBytes = 155; break;
+        case 'refund': vBytes = 140; break;
+        case 'withdraw': vBytes = hasChange ? 180 : 130; break;
+      }
+      return vBytes * 15; // 15 sats/vB fallback rate
+    }
+  };
+
+  // Helper to derive a completely new, unused change address by incrementing maxIndex (HD privacy)
+  const getNewChangeAddress = (network: bitcoin.Network): string => {
+    const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
+    const nextMaxIndex = maxIndex + 1;
+    
+    // Update index state
+    setMaxIndex(nextMaxIndex);
+    localStorage.setItem(`${keyPrefix}_max_index`, String(nextMaxIndex));
+    
+    const childKeys = deriveKeysForIndex(masterPrivateKey, nextMaxIndex, network);
+    console.log(`[CHANGE-DERIVATION] Generated fresh change address at index #${nextMaxIndex + 1}: ${childKeys.ownAddress}`);
+    return childKeys.ownAddress;
+  };
+
   // Load saved master key and active/max index pointers from LocalStorage on mount or networkMode change
   useEffect(() => {
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
@@ -777,8 +850,9 @@ export default function App() {
     const pubKey = Buffer.from(ownerKeyPair.publicKey);
     const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
 
+    const feeSats = await calculateTxFee('split-script');
     const inputSats = BigInt(selectedUtxoToSplit.amount);
-    const fee = BigInt(2000);
+    const fee = BigInt(feeSats);
     const outputSats = inputSats - fee;
 
     let mainTxid = '';
@@ -871,20 +945,27 @@ export default function App() {
       }
 
       const inputSats = BigInt(utxo.amount);
-      let withdrawSats = Number(withdrawAmountSats);
-      if (!withdrawSats || withdrawSats <= 0) {
-        // Default to withdraw max (minus 5000 sat standard fee)
-        withdrawSats = Number(inputSats) - 5000;
-      }
-
-      if (withdrawSats > Number(inputSats) - 5000) {
-        throw new Error(`Withdraw amount cannot exceed ${((Number(inputSats) - 5000) / 100000000).toFixed(4)} (input size minus fee).`);
-      }
-
       const net = getNetwork();
       const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
       const ownerKeyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
       const childKeys = deriveKeysForIndex(masterPrivateKey, utxoIndex, net);
+
+      let withdrawSats = Number(withdrawAmountSats);
+      const initialEstimateHasChange = inputSats > BigInt(withdrawSats || 0) + 5000n;
+      const initialFeeSats = await calculateTxFee('withdraw', initialEstimateHasChange);
+
+      if (!withdrawSats || withdrawSats <= 0) {
+        // Default to withdraw max (minus calculated dynamic fee)
+        withdrawSats = Number(inputSats) - initialFeeSats;
+      }
+
+      if (withdrawSats > Number(inputSats) - initialFeeSats) {
+        throw new Error(`Withdraw amount cannot exceed ${((Number(inputSats) - initialFeeSats) / 100000000).toFixed(4)} (input size minus fee).`);
+      }
+
+      const finalHasChange = inputSats > BigInt(withdrawSats) + BigInt(initialFeeSats);
+      const finalFeeSats = await calculateTxFee('withdraw', finalHasChange);
+      const changeAddress = finalHasChange ? getNewChangeAddress(net) : undefined;
 
       showToast(`Signing withdrawal from Address #${utxoIndex + 1}...`, "info");
 
@@ -897,7 +978,8 @@ export default function App() {
         withdrawDestAddress,
         isSplitAddress,
         isMainChain,
-        isSplitAddress ? childKeys.ownAddress : undefined, // If spending split contract, leftover change goes to ownAddress
+        changeAddress,
+        BigInt(finalFeeSats),
         net
       );
 
@@ -1093,6 +1175,10 @@ export default function App() {
           });
         }
 
+        const hasChange = BigInt(utxo.amount) > BigInt(targetAmount) + 5000n;
+        const feeSats = await calculateTxFee('funding', hasChange);
+        const changeAddress = hasChange ? getNewChangeAddress(net) : undefined;
+
         const tx = PureBitcoinSwap.buildHtlcFundingTx(
           keyPair,
           utxo.txid,
@@ -1102,7 +1188,8 @@ export default function App() {
           htlc.address!,
           splitDestPayment,
           merkleRoot,
-          ownAddress,
+          changeAddress,
+          BigInt(feeSats),
           net
         );
 
@@ -1210,6 +1297,10 @@ export default function App() {
           network: net
         });
 
+        const hasChange = BigInt(utxo.amount) > BigInt(targetAmount) + 5000n;
+        const feeSats = await calculateTxFee('funding', hasChange);
+        const changeAddress = hasChange ? getNewChangeAddress(net) : undefined;
+
         const tx = PureBitcoinSwap.buildHtlcFundingTx(
           keyPair,
           utxo.txid,
@@ -1219,7 +1310,8 @@ export default function App() {
           htlc.address!,
           splitDestPayment,
           Buffer.alloc(0),
-          ownAddress,
+          changeAddress,
+          BigInt(feeSats),
           net
         );
 
@@ -1309,12 +1401,13 @@ export default function App() {
           net
         );
 
+        const feeSats = await calculateTxFee('claim');
         const tx = PureBitcoinSwap.buildHtlcClaimTx(
           keyPair,
           utxo.txid,
           utxo.vout,
           BigInt(utxo.amount),
-          BigInt(utxo.amount - 2000), 
+          BigInt(utxo.amount - feeSats), 
           ownAddress, // Claim destination is user's own address!
           Buffer.from(selectedOffer.hashLock, 'hex'),
           Buffer.from(savedPreimage, 'hex'), 
