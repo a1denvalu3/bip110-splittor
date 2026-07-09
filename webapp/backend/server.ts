@@ -74,6 +74,16 @@ const NETWORK_MODE: 'mainnet' | 'regtest' =
 
 console.log(`[BOOT] BIP110 Splittoooor Backend starting up in [${NETWORK_MODE.toUpperCase()}] mode.`);
 
+// Strict state machine for valid Atomic Swap offer status transitions
+const ALLOWED_TRANSITIONS: Record<string, string[]> = {
+    'OPEN': ['ACCEPTED'],
+    'ACCEPTED': ['OPEN', 'FUNDED_INITIATOR'],
+    'FUNDED_INITIATOR': ['FUNDED_ACCEPTOR', 'REFUNDED'],
+    'FUNDED_ACCEPTOR': ['CLAIMED', 'REFUNDED'],
+    'CLAIMED': [],
+    'REFUNDED': []
+};
+
 // Bitcoin RPC helper for Regtest with Auto-Healing Wallet Loader
 class BitcoinRpc {
     private port: number;
@@ -397,43 +407,81 @@ app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
     }
 });
 
-// 4. Update HTLC Contracts / Txids
+// 4. Update HTLC Contracts / Txids (Enforces Cryptographic Verification)
 app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
     const id = req.params.id as string;
-    const { b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid, preimage, status, acceptorClaimed } = req.body;
+    const { fields, signer, signature } = req.body;
+
+    if (!fields || !signer || !signature) {
+        return res.status(400).json({ error: "Missing required update parameters (fields, signer, or signature)" });
+    }
+
+    if (signer !== 'initiator' && signer !== 'acceptor') {
+        return res.status(400).json({ error: "Invalid signer role. Must be 'initiator' or 'acceptor'" });
+    }
 
     try {
-        const offer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        const offer = await getOfferById(id);
         if (!offer) {
             return res.status(404).json({ error: "Offer not found" });
         }
 
-        const updates: string[] = [];
-        const params: any[] = [];
-
-        if (b110HtlcAddress !== undefined) { updates.push("b110HtlcAddress = ?"); params.push(b110HtlcAddress); }
-        if (btcHtlcAddress !== undefined) { updates.push("btcHtlcAddress = ?"); params.push(btcHtlcAddress); }
-        if (b110HtlcTxid !== undefined) { updates.push("b110HtlcTxid = ?"); params.push(b110HtlcTxid); }
-        if (btcHtlcTxid !== undefined) { updates.push("btcHtlcTxid = ?"); params.push(btcHtlcTxid); }
-        if (preimage !== undefined) { updates.push("preimage = ?"); params.push(preimage); }
-        if (status !== undefined) { updates.push("status = ?"); params.push(status); }
-        if (acceptorClaimed !== undefined) { updates.push("acceptorClaimed = ?"); params.push(acceptorClaimed ? 1 : 0); }
-
-        if (updates.length > 0) {
-            params.push(id);
-            await dbRun(
-                `UPDATE offers SET ${updates.join(', ')} WHERE id = ?`,
-                params
-            );
+        // 1a. Validate Status State Machine Transition
+        if (fields.status !== undefined && fields.status !== offer.status) {
+            const allowedNext = ALLOWED_TRANSITIONS[offer.status] || [];
+            if (!allowedNext.includes(fields.status)) {
+                return res.status(400).json({ 
+                    error: `Disallowed status transition: Cannot transition from '${offer.status}' to '${fields.status}'` 
+                });
+            }
         }
 
-        const updatedOffer = await dbGet("SELECT * FROM offers WHERE id = ?", [id]);
+        // 1. Determine verifying public key
+        const pubKeyHex = signer === 'initiator' ? offer.initiatorPubKey : offer.acceptorPubKey;
+        if (!pubKeyHex) {
+            return res.status(400).json({ error: `Cannot verify signature: No registered public key for '${signer}'` });
+        }
+
+        // 2. Build canonical message for deterministic verification
+        const canonicalStringify = (obj: any): string => {
+            const keys = Object.keys(obj).sort();
+            const sortedObj: Record<string, any> = {};
+            for (const key of keys) {
+                if (obj[key] !== undefined) {
+                    sortedObj[key] = obj[key];
+                }
+            }
+            return JSON.stringify(sortedObj);
+        };
+
+        const msg = `update-offer:${id}:${canonicalStringify(fields)}`;
+        
+        // 3. Cryptographically verify signature
+        try {
+            const msgHash = bitcoin.crypto.sha256(Buffer.from(msg));
+            const sigBuf = Buffer.from(signature, 'hex');
+            const pubKeyBuf = Buffer.from(pubKeyHex, 'hex');
+
+            const pair = ECPair.fromPublicKey(pubKeyBuf);
+            const verified = pair.verify(msgHash, sigBuf);
+
+            if (!verified) {
+                return res.status(401).json({ error: "Invalid signature. Update request denied." });
+            }
+        } catch (sigErr: any) {
+            return res.status(401).json({ error: "Signature verification failed: " + sigErr.message });
+        }
+
+        // 4. Update database fields cleanly
+        await updateOfferFieldsById(id, fields);
+
+        const updatedOffer = await getOfferById(id);
         res.json({
             ...updatedOffer,
-            acceptorClaimed: updatedOffer.acceptorClaimed === 1
+            acceptorClaimed: updatedOffer?.acceptorClaimed === 1
         });
     } catch (err: any) {
-        res.status(500).json({ error: "Database error during update: " + err.message });
+        res.status(500).json({ error: "Database error during verified update: " + err.message });
     }
 });
 

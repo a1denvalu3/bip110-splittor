@@ -419,9 +419,10 @@ export default function App() {
         });
 
         // Update Offer State on server
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
+        const role = selectedOffer.initiatorPubKey === publicKey ? 'initiator' : 'acceptor';
+        const updateRes = await secureUpdateOffer(selectedOffer.id, {
           status: 'REFUNDED'
-        });
+        }, role);
 
         setSelectedOffer(updateRes.data);
         showToast("HTLC successfully refunded! Your coins have been reclaimed.", "success");
@@ -493,9 +494,10 @@ export default function App() {
         });
 
         // Update Offer State on server
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
+        const role = selectedOffer.initiatorPubKey === publicKey ? 'initiator' : 'acceptor';
+        const updateRes = await secureUpdateOffer(selectedOffer.id, {
           status: 'REFUNDED'
-        });
+        }, role);
 
         setSelectedOffer(updateRes.data);
         showToast("HTLC successfully refunded! Your coins have been reclaimed.", "success");
@@ -1328,6 +1330,33 @@ export default function App() {
     }
   };
 
+  const secureUpdateOffer = async (offerId: string, fields: Partial<Offer>, signerRole: 'initiator' | 'acceptor') => {
+    const canonicalStringify = (obj: any): string => {
+      const keys = Object.keys(obj).sort();
+      const sortedObj: Record<string, any> = {};
+      for (const key of keys) {
+        if (obj[key] !== undefined) {
+          sortedObj[key] = obj[key];
+        }
+      }
+      return JSON.stringify(sortedObj);
+    };
+
+    const msg = `update-offer:${offerId}:${canonicalStringify(fields)}`;
+    const msgHash = bitcoin.crypto.sha256(Buffer.from(msg));
+    
+    const pair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'));
+    const sig = pair.sign(msgHash);
+    const signature = Buffer.from(sig).toString('hex');
+
+    const res = await axios.post(`${API_BASE}/offers/${offerId}/update`, {
+      fields,
+      signer: signerRole,
+      signature
+    });
+    return res.data;
+  };
+
   const handleCreateOffer = async (e: React.FormEvent) => {
     e.preventDefault();
     setPublishing(true);
@@ -1535,7 +1564,7 @@ export default function App() {
           updateParams.b110HtlcTxid = broadcastRes.data.txid;
         }
 
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, updateParams);
+        const updateRes = await secureUpdateOffer(selectedOffer.id, updateParams, 'initiator');
 
         setSelectedOffer(updateRes.data);
         showToast(`${targetChain === 'main' ? 'Bitcoin' : 'BIP110'} HTLC successfully funded!`, 'success');
@@ -1657,7 +1686,7 @@ export default function App() {
           updateParams.b110HtlcTxid = broadcastRes.data.txid;
         }
 
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, updateParams);
+        const updateRes = await secureUpdateOffer(selectedOffer.id, updateParams, 'acceptor');
 
         setSelectedOffer(updateRes.data);
         showToast(`${targetChain === 'main' ? 'Bitcoin' : 'BIP110'} HTLC successfully funded!`, 'success');
@@ -1749,10 +1778,10 @@ export default function App() {
         });
 
         // Update Offer State on server
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
+        const updateRes = await secureUpdateOffer(selectedOffer.id, {
           preimage: savedPreimage,
           status: 'CLAIMED'
-        });
+        }, 'initiator');
 
         setSelectedOffer(updateRes.data);
         showToast(`${targetChain === 'main' ? 'BTC' : 'B110'} claimed successfully! Preimage revealed.`, 'success');
@@ -1831,10 +1860,10 @@ export default function App() {
           networkMode
         });
 
-        const updateRes = await axios.post(`${API_BASE}/offers/${selectedOffer.id}/update`, {
+        const updateRes = await secureUpdateOffer(selectedOffer.id, {
           status: 'CLAIMED',
           acceptorClaimed: true
-        });
+        }, 'acceptor');
 
         setSelectedOffer(updateRes.data);
         showToast(`${targetChain === 'main' ? 'BTC' : 'B110'} claimed successfully! Swap fully completed.`, 'success');
