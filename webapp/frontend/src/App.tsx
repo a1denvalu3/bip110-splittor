@@ -29,7 +29,9 @@ import {
   User,
   Check,
   Download,
-  Upload
+  Upload,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 
 // Initialize Elliptic Curve library in the browser
@@ -44,6 +46,55 @@ const deriveKeyPairForIndex = (masterPrivHex: string, index: number, network: bi
   const hash = bitcoin.crypto.sha256(combined);
   return ECPair.fromPrivateKey(hash, { network });
 };
+
+interface CollapsibleCardProps {
+  title: string;
+  icon?: React.ComponentType<any>;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+  className?: string;
+  headerRight?: React.ReactNode;
+}
+
+function CollapsibleCard({
+  title,
+  icon: Icon,
+  children,
+  defaultOpen = true,
+  className = "",
+  headerRight
+}: CollapsibleCardProps) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+
+  return (
+    <div className={`bg-slate-900/50 border border-slate-800/80 rounded-2xl shadow-xl backdrop-blur-sm overflow-hidden ${className}`}>
+      <div
+        className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-900/10 transition-colors cursor-pointer select-none"
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        <div className="flex items-center gap-2">
+          {Icon && <Icon className="w-5 h-5 text-indigo-400" />}
+          <h3 className="text-md font-semibold text-slate-200">{title}</h3>
+        </div>
+        <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+          {headerRight}
+          <button
+            type="button"
+            onClick={() => setIsOpen(!isOpen)}
+            className="text-slate-500 hover:text-slate-300 transition-colors p-1"
+          >
+            {isOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+        </div>
+      </div>
+      {isOpen && (
+        <div className="px-6 pb-6 pt-2 border-t border-slate-800/40">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const API_BASE = 'http://localhost:4000/api';
 
@@ -2109,8 +2160,8 @@ export default function App() {
                 </h3>
                 <p className="text-xs text-slate-400 mb-6">
                   {networkMode === 'mainnet' 
-                    ? '🔒 Keypair generated and retained entirely inside your browser sandbox. Your private key never leaves this tab.' 
-                    : 'Ephemeral, regtest-ready cryptographic keys generated entirely offline. Your keys govern split spending and signatures.'}
+                    ? '🔒 Kept securely inside your browser sandbox.' 
+                    : 'Regtest-ready keys generated entirely offline.'}
                 </p>
 
                 <div className="space-y-4">
@@ -2171,9 +2222,6 @@ export default function App() {
                           );
                         })}
                       </select>
-                      <span className="text-[10px] text-slate-500 block mt-1.5 leading-normal">
-                        Select any previously generated address from history. Its unspent balances, claims, and history will load instantly!
-                      </span>
                     </div>
                   )}
                 </div>
@@ -2187,7 +2235,7 @@ export default function App() {
                     Derived P2TR Split Address
                   </h4>
                   <p className="text-xs text-slate-400 mb-4">
-                    Both Core and Knots recognize this exact taproot address. Its spend behavior is dual-sided: Scriptpath on Bitcoin, Keypath on BIP110.
+                    Dual-spend behavior: Scriptpath on Bitcoin, Keypath on BIP110.
                   </p>
 
                   <div className="bg-slate-950 border border-slate-800 px-3 py-2.5 rounded-xl flex items-center justify-between font-mono text-xs text-sky-300 mb-4">
@@ -2235,16 +2283,14 @@ export default function App() {
             </div>
 
             {/* HD Wallet Security, Backup & Recovery Card */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
-              <div>
-                <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                  <ShieldCheck className="w-5 h-5 text-indigo-400" />
-                  HD Wallet Security, Backup & Restore
-                </h3>
-                <p className="text-xs text-slate-400">
-                  This application uses a Hierarchical Deterministic (HD) scheme. All your P2TR addresses, split contracts, and change keys are derived from a single Master Private Key. Keep it safe and backed up!
-                </p>
-              </div>
+            <CollapsibleCard 
+              title="HD Wallet Backup & Restore" 
+              icon={ShieldCheck} 
+              defaultOpen={false}
+            >
+              <p className="text-xs text-slate-400 mb-4">
+                Derived from a single Master Private Key. Keep it safe and backed up!
+              </p>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Download Backup Section */}
@@ -2254,8 +2300,8 @@ export default function App() {
                       <Download className="w-4 h-4 text-emerald-400" />
                       1. Backup Master Seed
                     </h4>
-                    <p className="text-[11px] text-slate-500 leading-relaxed mb-4">
-                      Download a secure JSON backup file containing your Master Seed and account indexes. This is required to unlock coin-splitting and safe-refund features.
+                    <p className="text-[11px] text-slate-500 mb-4">
+                      Download a secure JSON backup of your Master Seed to unlock coin-splitting and safe-refunds.
                     </p>
 
                     <div>
@@ -2294,8 +2340,8 @@ export default function App() {
                       <Upload className="w-4 h-4 text-sky-400" />
                       2. Restore Wallet
                     </h4>
-                    <p className="text-[11px] text-slate-500 leading-relaxed mb-4">
-                      Restore your master private key and address history instantly. Drag & drop or click below to upload your downloaded recovery JSON backup file.
+                    <p className="text-[11px] text-slate-500 mb-4">
+                      Upload your recovery JSON backup file to restore your Master Key and history.
                     </p>
 
                     {/* Hidden input element */}
@@ -2318,113 +2364,112 @@ export default function App() {
                   </div>
                 </div>
               </div>
-            </div>
+            </CollapsibleCard>
 
             {/* Faucet Card (Regtest only) OR Production Instructions Card */}
-            {networkMode === 'regtest' ? (
-              <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-                <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                  <Coins className="w-5 h-5 text-amber-500" />
-                  Regtest Faucet & Node Funder
-                </h3>
-                <p className="text-xs text-slate-400 mb-6">
-                  Follow these steps to fully fund your local regtest environment and pay the P2TR split contract address, completely without using terminal commands or CLI tools.
-                </p>
+            <CollapsibleCard
+              title={networkMode === 'regtest' ? "Regtest Faucet & Node Funder" : "Mainnet Funding Instructions"}
+              icon={networkMode === 'regtest' ? Coins : Sparkles}
+              defaultOpen={networkMode === 'regtest'}
+            >
+              {networkMode === 'regtest' ? (
+                <>
+                  <p className="text-xs text-slate-400 mb-6">
+                    Fund your local regtest environment and deposit simulated coins into your P2TR split contract address.
+                  </p>
 
-                <div className="space-y-6">
-                  {/* Step 1: Fund Nodes */}
-                  <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="max-w-md">
-                      <h4 className="text-xs font-bold text-slate-200 mb-1">Step 1: Bootstrap BIP110 Consensus & Miner Wallets</h4>
-                      <p className="text-[10px] text-slate-400">Mine 450 blocks of shared history. This activates the native BIP110 (reduced_data) consensus rules on Knots (natively activates at block 432) and matures Coinbase miner rewards.</p>
-                    </div>
-                    <button
-                      onClick={() => mineBlocks('main', 450)}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-start sm:self-center"
-                    >
-                      Mine 450 blocks
-                    </button>
-                  </div>
-
-                  {/* Step 2: Pay P2TR Split Address */}
-                  <div className="bg-slate-950 p-4 rounded-xl border border-slate-850">
-                    <h4 className="text-xs font-bold text-slate-200 mb-1">Step 2: Pay unified P2TR Split Address</h4>
-                    <p className="text-[10px] text-slate-400 mb-4">Transfer simulated coins from the mature miner wallet directly into your unified P2TR split contract address (automatically mines 1 block to confirm).</p>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-                      <div>
-                        <label className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider mb-2">Deposit Amount (Sats)</label>
-                        <input
-                          type="number"
-                          value={faucetAmount}
-                          onChange={(e) => setFaucetAmount(e.target.value)}
-                          className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
-                        />
+                  <div className="space-y-6">
+                    {/* Step 1: Fund Nodes */}
+                    <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="max-w-md">
+                        <h4 className="text-xs font-bold text-slate-200 mb-1">Step 1: Bootstrap BIP110 Consensus & Miner Wallets</h4>
+                        <p className="text-[10px] text-slate-400">Mine 450 blocks of shared history to activate BIP110 consensus on Knots and mature Coinbase miner rewards.</p>
                       </div>
-
                       <button
-                        onClick={() => runFaucet('main')}
-                        disabled={faucetLoading['main']}
-                        className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg py-2.5 transition-all disabled:opacity-50"
+                        onClick={() => mineBlocks('main', 450)}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all self-start sm:self-center"
                       >
-                        {faucetLoading['main'] ? 'Depositing...' : 'Pay from Core Faucet'}
+                        Mine 450 blocks
                       </button>
+                    </div>
 
-                      <button
-                        onClick={() => runFaucet('bip110')}
-                        disabled={faucetLoading['bip110']}
-                        className="w-full bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs rounded-lg py-2.5 transition-all disabled:opacity-50"
-                      >
-                        {faucetLoading['bip110'] ? 'Depositing...' : 'Pay from Knots Faucet'}
+                    {/* Step 2: Pay P2TR Split Address */}
+                    <div className="bg-slate-950 p-4 rounded-xl border border-slate-850">
+                      <h4 className="text-xs font-bold text-slate-200 mb-1">Step 2: Pay unified P2TR Split Address</h4>
+                      <p className="text-[10px] text-slate-400 mb-4">Transfer simulated coins from the mature miner wallet directly into your unified P2TR split contract address (mines 1 block to confirm).</p>
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider mb-2">Deposit Amount (Sats)</label>
+                          <input
+                            type="number"
+                            value={faucetAmount}
+                            onChange={(e) => setFaucetAmount(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+
+                        <button
+                          onClick={() => runFaucet('main')}
+                          disabled={faucetLoading['main']}
+                          className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg py-2.5 transition-all disabled:opacity-50"
+                        >
+                          {faucetLoading['main'] ? 'Depositing...' : 'Pay from Core Faucet'}
+                        </button>
+
+                        <button
+                          onClick={() => runFaucet('bip110')}
+                          disabled={faucetLoading['bip110']}
+                          className="w-full bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs rounded-lg py-2.5 transition-all disabled:opacity-50"
+                        >
+                          {faucetLoading['bip110'] ? 'Depositing...' : 'Pay from Knots Faucet'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 pt-4 border-t border-slate-800 flex justify-between items-center text-xs text-slate-400">
+                    <span>Simulate blocks:</span>
+                    <div className="flex gap-2">
+                      <button onClick={() => mineBlocks('main', 1)} className="hover:text-white border border-slate-800 px-3 py-1.5 rounded-lg bg-slate-950">
+                        Mine 1 block (Core)
+                      </button>
+                      <button onClick={() => mineBlocks('bip110', 1)} className="hover:text-white border border-slate-800 px-3 py-1.5 rounded-lg bg-slate-950">
+                        Mine 1 block (Knots)
                       </button>
                     </div>
                   </div>
-                </div>
-
-                <div className="mt-6 pt-4 border-t border-slate-800 flex justify-between items-center text-xs text-slate-400">
-                  <span>Want to simulate standard time or blocks?</span>
-                  <div className="flex gap-2">
-                    <button onClick={() => mineBlocks('main', 1)} className="hover:text-white border border-slate-800 px-3 py-1.5 rounded-lg bg-slate-950">
-                      Mine 1 block (Core)
-                    </button>
-                    <button onClick={() => mineBlocks('bip110', 1)} className="hover:text-white border border-slate-800 px-3 py-1.5 rounded-lg bg-slate-950">
-                      Mine 1 block (Knots)
-                    </button>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                    Send real BTC/BIP110 funds directly to your **Unified P2TR Split Address** shown above.
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs mt-4">
+                    <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
+                      <h4 className="font-semibold text-slate-200 mb-1.5">For Bitcoin Mainnet</h4>
+                      <p className="text-slate-400 mb-3">Send BTC to your P2TR address. Track confirmations using any major mainnet block explorer.</p>
+                      <a href={`https://mempool.space/address/${splitAddress}`} target="_blank" rel="noreferrer" className="text-amber-400 hover:underline flex items-center gap-1 font-semibold">
+                        View on Mempool.space <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                    <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
+                      <h4 className="font-semibold text-slate-200 mb-1.5">For BIP110-Chain</h4>
+                      <p className="text-slate-400 mb-3">Send your fork assets to the same P2TR address. Ensure transaction settles.</p>
+                      <span className="text-slate-500 flex items-center gap-1 font-medium">
+                        Requires BIP110 Wallet connection
+                      </span>
+                    </div>
                   </div>
-                </div>
-              </div>
-            ) : (
-              <div className="bg-gradient-to-tr from-amber-950/20 to-slate-900 border border-amber-900/30 rounded-2xl p-6 shadow-xl relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/5 rounded-full blur-2xl" />
-                <h3 className="text-md font-semibold text-amber-400 mb-2 flex items-center gap-2">
-                  <Sparkles className="w-5 h-5 text-amber-400" />
-                  Mainnet Production Funding Instructions
-                </h3>
-                <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                  To swap real Bitcoin for BIP110-Chain assets, send your desired deposit funds directly to your **Unified P2TR Split Address** shown above.
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs mt-4">
-                  <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
-                    <h4 className="font-semibold text-slate-200 mb-1.5">For Bitcoin Mainnet</h4>
-                    <p className="text-slate-400 mb-3">Send BTC to your P2TR address. Track confirmations using any major mainnet block explorer.</p>
-                    <a href={`https://mempool.space/address/${splitAddress}`} target="_blank" rel="noreferrer" className="text-amber-400 hover:underline flex items-center gap-1 font-semibold">
-                      View on Mempool.space <ExternalLink className="w-3 h-3" />
-                    </a>
-                  </div>
-                  <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
-                    <h4 className="font-semibold text-slate-200 mb-1.5">For BIP110-Chain</h4>
-                    <p className="text-slate-400 mb-3">Send your fork assets to the same P2TR address on the BIP110-Chain. Ensure transaction settles.</p>
-                    <span className="text-slate-500 flex items-center gap-1 font-medium">
-                      Requires BIP110 Wallet/Node connection
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
+                </>
+              )}
+            </CollapsibleCard>
 
             {/* UTXOs Monitor */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-              <h3 className="text-md font-semibold text-slate-200 mb-4">Confirmed UTXO Ledger</h3>
+            <CollapsibleCard
+              title="Confirmed UTXO Ledger"
+              defaultOpen={true}
+            >
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2.5">Bitcoin UTXOs</h4>
@@ -2549,18 +2594,14 @@ export default function App() {
                   </div>
                 </div>
               </div>
-            </div>
+            </CollapsibleCard>
 
             {/* Withdraw Funds Panel */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-              <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                <ExternalLink className="w-5 h-5 text-indigo-400" />
-                Withdraw Unlocked Funds
-              </h3>
-              <p className="text-xs text-slate-400 mb-6">
-                You can withdraw any unlocked unspent output (UTXO) to an external Bitcoin/BIP110 address at any time.
-              </p>
-
+            <CollapsibleCard
+              title="Withdraw Unlocked Funds"
+              icon={ExternalLink}
+              defaultOpen={false}
+            >
               <form onSubmit={executeWithdrawal} className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
@@ -2679,20 +2720,20 @@ export default function App() {
                   </div>
                 </div>
               </form>
-            </div>
+            </CollapsibleCard>
           </div>
         )}
 
         {/* TAB 2: COIN SPLITTER */}
         {activeTab === 'splitter' && (
           <div className="space-y-8">
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-              <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                <Layers className="w-5 h-5 text-indigo-400" />
-                Bilateral Replay-Proof Coin Splitter
-              </h3>
+            <CollapsibleCard
+              title="Bilateral Replay-Proof Coin Splitter"
+              icon={Layers}
+              defaultOpen={true}
+            >
               <p className="text-xs text-slate-400 mb-6">
-                Both the Initiator and the Acceptor must split their coins by script-spending their P2TR split contract outputs to their own safe addresses. This makes their balances 100% replay-protected and safe to fund HTLCs.
+                Split your coins to protect them from replay risk and secure your balances before funding HTLCs.
               </p>
 
               {/* Dynamic Read-only Split Destination Panel */}
@@ -2755,10 +2796,11 @@ export default function App() {
                 </div>
 
                 {/* Show already split UTXOs as non-selectable */}
-                <div>
-                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
-                    Already Split UTXOs (Replay-Protected)
-                  </h4>
+                <CollapsibleCard
+                  title="Already Split UTXOs (Replay-Protected)"
+                  defaultOpen={false}
+                  className="bg-slate-950/20 border-slate-850/60"
+                >
                   <div className="space-y-2">
                     {/* Render split UTXOs on Main-Chain */}
                     {ownMainUtxos.map((u, i) => (
@@ -2832,7 +2874,7 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                </div>
+                </CollapsibleCard>
 
                 {/* Single Split Spends Action Button */}
                 <div className="pt-4">
@@ -2878,7 +2920,7 @@ export default function App() {
                           <div>
                             <div className="truncate mb-1">✔️ Success! Split Txid: {bilateralSplitResult.mainTxid}</div>
                             <div className="text-[10px] text-slate-400 leading-normal mt-2">
-                              Because this transaction contains the banned OP_IF opcode in its scriptpath, the BIP110-Chain (Knots) will reject it entirely. This guarantees that your original pre-fork UTXO remains unspent, valid, and fully split on Knots!
+                              Contains banned OP_IF, so BIP110-Chain will reject it, keeping your coins safely split on Knots.
                             </div>
                           </div>
                         ) : (
@@ -2889,7 +2931,7 @@ export default function App() {
                   </div>
                 )}
               </div>
-            </div>
+            </CollapsibleCard>
           </div>
         )}
 
@@ -2897,13 +2939,13 @@ export default function App() {
         {activeTab === 'marketplace' && (
           <div className="space-y-8">
             {/* Publish Form */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-              <h3 className="text-md font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                <Plus className="w-5 h-5 text-indigo-400" />
-                Publish Swap Offer (Initiator)
-              </h3>
+            <CollapsibleCard
+              title="Publish Swap Offer (Initiator)"
+              icon={Plus}
+              defaultOpen={true}
+            >
               <p className="text-xs text-slate-400 mb-6">
-                Publish a sell contract. You sell BIP110 coins in exchange for Main-Chain Bitcoin.
+                List a swap offer selling BIP110 for Main-Chain BTC.
               </p>
 
               <form onSubmit={handleCreateOffer} className="space-y-6">
@@ -3053,15 +3095,15 @@ export default function App() {
                   </div>
                 </div>
               </form>
-            </div>
+            </CollapsibleCard>
 
             {/* PUBLIC MARKETPLACE LOBBY */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
-              <h3 className="text-md font-semibold text-slate-200 flex items-center gap-2">
-                <TrendingUp className="w-5 h-5 text-indigo-400" />
-                Public Marketplace Lobby ({networkMode === 'mainnet' ? 'Mainnet' : 'Regtest'})
-              </h3>
-              <p className="text-xs text-slate-400">
+            <CollapsibleCard
+              title={`Public Marketplace Lobby (${networkMode === 'mainnet' ? 'Mainnet' : 'Regtest'})`}
+              icon={TrendingUp}
+              defaultOpen={true}
+            >
+              <p className="text-xs text-slate-400 mb-6">
                 Accept swap offers published by other counterparties.
               </p>
 
@@ -3159,7 +3201,7 @@ export default function App() {
                   })
                 )}
               </div>
-            </div>
+            </CollapsibleCard>
           </div>
         )}
 
@@ -3167,13 +3209,13 @@ export default function App() {
         {activeTab === 'my-offers' && (
           <div className="space-y-8">
             {/* Published Swaps (You are Initiator) */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
-              <h3 className="text-md font-semibold text-slate-200 flex items-center gap-2">
-                <User className="w-5 h-5 text-indigo-400" />
-                My Swaps & Open Offers (You are Initiator)
-              </h3>
-              <p className="text-xs text-slate-400">
-                Monitor the state of swap contracts you published and manage deletions.
+            <CollapsibleCard
+              title="My Swaps & Open Offers (You are Initiator)"
+              icon={User}
+              defaultOpen={true}
+            >
+              <p className="text-xs text-slate-400 mb-6">
+                Monitor and manage swap offers you published.
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -3262,16 +3304,16 @@ export default function App() {
                   ))
                 )}
               </div>
-            </div>
+            </CollapsibleCard>
 
             {/* Accepted Swaps (You are Acceptor) */}
-            <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm space-y-6">
-              <h3 className="text-md font-semibold text-slate-200 flex items-center gap-2">
-                <UserCheck className="w-5 h-5 text-emerald-400" />
-                Swaps I Have Accepted (You are Acceptor)
-              </h3>
-              <p className="text-xs text-slate-400">
-                Monitor the swaps you accepted and coordinate escrows. You can walk back your acceptance if the initiator hasn't funded the HTLC yet.
+            <CollapsibleCard
+              title="Swaps I Have Accepted (You are Acceptor)"
+              icon={UserCheck}
+              defaultOpen={true}
+            >
+              <p className="text-xs text-slate-400 mb-6">
+                Monitor swaps you accepted. You can walk back acceptance if the initiator hasn't funded the HTLC yet.
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -3359,7 +3401,7 @@ export default function App() {
                   ))
                 )}
               </div>
-            </div>
+            </CollapsibleCard>
           </div>
         )}
 
@@ -3387,7 +3429,7 @@ export default function App() {
                       Trading B110 for Bitcoin
                     </h2>
                     <p className="text-xs text-slate-400 mt-1">
-                      Coordinating escrow claims using pure, hyper-optimized Taproot MAST script leaves. All transactions are locally constructed and securely signed in your browser.
+                      Construct and sign Taproot MAST transactions securely in your browser.
                     </p>
                   </div>
 
@@ -3524,13 +3566,12 @@ export default function App() {
                 </div>
 
                 {/* Interactive Steps Action Board */}
-                <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-                  <h3 className="text-md font-semibold text-slate-200 mb-4 flex items-center gap-2">
-                    <Activity className="w-5 h-5 text-indigo-400" />
-                    Wizard Actions Dashboard
-                  </h3>
-
-                  <div className="space-y-6">
+                <CollapsibleCard
+                  title="Wizard Actions Dashboard"
+                  icon={Activity}
+                  defaultOpen={true}
+                >
+                  <div className="space-y-6 mt-2">
                     {/* STEP 1 Checkbox */}
                     <div className="bg-slate-950 border border-slate-850 p-4 rounded-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                       <div>
@@ -3770,60 +3811,65 @@ export default function App() {
                       const isExpired = currentHeight >= targetLocktime;
 
                       return (
-                        <div className="bg-slate-900/30 border border-slate-800 p-5 rounded-xl space-y-3 mt-4">
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <h4 className="text-xs font-bold text-slate-300">Safety Refund Contract Gating</h4>
-                              <p className="text-[10px] text-slate-400 mt-0.5 leading-normal">
-                                If the counterparty disappears or fails to fulfill their step, you can safely reclaim your locked funds from the HTLC after block height expiration.
-                              </p>
+                        <CollapsibleCard
+                          title="Safety Refund Panel"
+                          icon={AlertTriangle}
+                          defaultOpen={false}
+                          className="mt-4"
+                        >
+                          <div className="space-y-3 mt-2">
+                            <p className="text-[10px] text-slate-400 leading-normal">
+                              If the counterparty disappears or fails to fulfill their step, you can safely reclaim your locked funds from the HTLC after block height expiration.
+                            </p>
+                            <div className="flex justify-between items-center bg-slate-950/40 p-2.5 rounded-lg border border-slate-900">
+                              <span className="text-[10px] font-bold text-slate-400">Lock Status:</span>
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${isExpired ? 'bg-amber-950/40 border-amber-900/60 text-amber-400 animate-pulse' : 'bg-slate-950 border-slate-900 text-slate-500'}`}>
+                                {isExpired ? 'EXPIRED (REFUND READY)' : 'LOCKED'}
+                              </span>
                             </div>
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${isExpired ? 'bg-amber-950/40 border-amber-900/60 text-amber-400 animate-pulse' : 'bg-slate-950 border-slate-900 text-slate-500'}`}>
-                              {isExpired ? 'EXPIRED (REFUND READY)' : 'LOCKED'}
-                            </span>
-                          </div>
 
-                          <div className="grid grid-cols-2 gap-4 text-[10px] font-mono bg-slate-950 border border-slate-900 p-3 rounded-lg leading-normal">
-                            <div>
-                              <span className="text-slate-500 block">Your HTLC Locktime:</span>
-                              <span className="font-semibold text-slate-300">Block #{targetLocktime}</span>
+                            <div className="grid grid-cols-2 gap-4 text-[10px] font-mono bg-slate-950 border border-slate-900 p-3 rounded-lg leading-normal">
+                              <div>
+                                <span className="text-slate-500 block">Your HTLC Locktime:</span>
+                                <span className="font-semibold text-slate-300">Block #{targetLocktime}</span>
+                              </div>
+                              <div>
+                                <span className="text-slate-500 block">Current Height ({targetChain === 'main' ? 'BTC' : 'B110'}):</span>
+                                <span className={`font-semibold ${isExpired ? 'text-amber-400 font-bold' : 'text-slate-400'}`}>Block #{currentHeight}</span>
+                              </div>
                             </div>
-                            <div>
-                              <span className="text-slate-500 block">Current Height ({targetChain === 'main' ? 'BTC' : 'B110'}):</span>
-                              <span className={`font-semibold ${isExpired ? 'text-amber-400 font-bold' : 'text-slate-400'}`}>Block #{currentHeight}</span>
-                            </div>
-                          </div>
 
-                          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pt-2 gap-4 border-t border-slate-800/80 mt-2">
-                            <span className="text-[10px] text-slate-500 font-medium leading-normal">
-                              {isExpired 
-                                ? '✔️ Refund window is OPEN. Reclaim your funds now.' 
-                                : `⏳ Refund opens in ${targetLocktime - currentHeight} blocks (~${(((targetLocktime - currentHeight) * 10) / 60).toFixed(1)} hrs).`}
-                            </span>
-                            <div className="flex flex-wrap sm:flex-nowrap gap-2 w-full sm:w-auto justify-end">
-                              {networkMode === 'regtest' && !isExpired && (
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pt-2 gap-4 border-t border-slate-800/80 mt-2">
+                              <span className="text-[10px] text-slate-500 font-medium leading-normal">
+                                {isExpired 
+                                  ? '✔️ Refund window is OPEN.' 
+                                  : `⏳ Refund opens in ${targetLocktime - currentHeight} blocks (~${(((targetLocktime - currentHeight) * 10) / 60).toFixed(1)} hrs).`}
+                              </span>
+                              <div className="flex flex-wrap sm:flex-nowrap gap-2 w-full sm:w-auto justify-end">
+                                {networkMode === 'regtest' && !isExpired && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const blocksNeeded = targetLocktime - currentHeight;
+                                      mineBlocks(targetChain, blocksNeeded);
+                                    }}
+                                    className="px-3 py-2 bg-indigo-600/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/40 font-semibold text-xs rounded-xl transition-all whitespace-nowrap"
+                                    title={`Fast-forward by mining ${targetLocktime - currentHeight} blocks`}
+                                  >
+                                    ⚡ Fast-Forward {targetLocktime - currentHeight} Blocks
+                                  </button>
+                                )}
                                 <button
-                                  type="button"
-                                  onClick={() => {
-                                    const blocksNeeded = targetLocktime - currentHeight;
-                                    mineBlocks(targetChain, blocksNeeded);
-                                  }}
-                                  className="px-3 py-2 bg-indigo-600/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/40 font-semibold text-xs rounded-xl transition-all whitespace-nowrap"
-                                  title={`Fast-forward by mining ${targetLocktime - currentHeight} blocks`}
+                                  onClick={executeRefund}
+                                  disabled={!isExpired}
+                                  className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-md transition-all whitespace-nowrap"
                                 >
-                                  ⚡ Fast-Forward {targetLocktime - currentHeight} Blocks
+                                  Reclaim Locked Funds
                                 </button>
-                              )}
-                              <button
-                                onClick={executeRefund}
-                                disabled={!isExpired}
-                                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs rounded-xl shadow-md transition-all whitespace-nowrap"
-                              >
-                                Reclaim Locked Funds
-                              </button>
+                              </div>
                             </div>
                           </div>
-                        </div>
+                        </CollapsibleCard>
                       );
                     })()}
 
@@ -3836,7 +3882,7 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                </div>
+                </CollapsibleCard>
               </div>
             )}
           </div>
