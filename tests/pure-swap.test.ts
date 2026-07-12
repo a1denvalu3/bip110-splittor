@@ -179,4 +179,55 @@ describe('Pure Bitcoinjs-Lib Optimized Swap Tests', () => {
         );
         expect(badAddressCheck3).to.be.false;
     });
+
+    it('6. Multi-input Taproot HTLC Funding should build a valid transaction with multiple signed inputs', () => {
+        const recipientKeyPair = PureBitcoinSwap.generateKeyPair();
+        const recipientPubKey = Buffer.from(recipientKeyPair.publicKey);
+
+        const payment = bitcoin.payments.p2tr({
+            internalPubkey: PureBitcoinSwap.getXOnlyPubKey(recipientPubKey),
+            network: bitcoin.networks.regtest
+        });
+
+        const htlcAddr = payment.address!;
+        const changeAddr = payment.address!;
+
+        const input1 = {
+            txid: '1111111111111111111111111111111111111111111111111111111111111111',
+            vout: 0,
+            amount: 100000n,
+            keyPair: recipientKeyPair,
+            merkleRoot: Buffer.alloc(0),
+            paymentOutput: payment.output!
+        };
+
+        const input2 = {
+            txid: '2222222222222222222222222222222222222222222222222222222222222222',
+            vout: 1,
+            amount: 150000n,
+            keyPair: recipientKeyPair,
+            merkleRoot: Buffer.alloc(0),
+            paymentOutput: payment.output!
+        };
+
+        const tx = PureBitcoinSwap.buildMultiInputHtlcFundingTx(
+            [input1, input2],
+            180000n,
+            htlcAddr,
+            changeAddr,
+            10000n
+        );
+
+        expect(tx).to.be.an.instanceOf(bitcoin.Transaction);
+        expect(tx.ins.length).to.equal(2);
+        expect(tx.outs.length).to.equal(2);
+        
+        expect(tx.outs[0].value).to.equal(180000n);
+        expect(tx.outs[1].value).to.equal(60000n);
+
+        expect(tx.ins[0].witness).to.not.be.undefined;
+        expect(tx.ins[0].witness!.length).to.equal(1);
+        expect(tx.ins[1].witness).to.not.be.undefined;
+        expect(tx.ins[1].witness!.length).to.equal(1);
+    });
 });

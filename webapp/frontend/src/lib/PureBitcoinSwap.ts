@@ -280,6 +280,70 @@ export class PureBitcoinSwap {
     }
 
     /**
+     * Builds and signs an HTLC funding transaction spending from multiple split destination UTXOs.
+     */
+    static buildMultiInputHtlcFundingTx(
+        inputs: Array<{
+            txid: string;
+            vout: number;
+            amount: bigint;
+            keyPair: ECPairInterface;
+            merkleRoot: Buffer;
+            paymentOutput: Buffer | Uint8Array;
+        }>,
+        outputSats: bigint,
+        htlcAddr: string,
+        changeAddr?: string,
+        feeSats: bigint = 5000n,
+        network: bitcoin.Network = bitcoin.networks.regtest
+    ): bitcoin.Transaction {
+        const tx = new bitcoin.Transaction();
+        tx.version = 2;
+
+        // Add all inputs
+        for (const input of inputs) {
+            tx.addInput(Buffer.from(input.txid, 'hex').reverse(), input.vout);
+        }
+
+        const totalInputSats = inputs.reduce((sum, input) => sum + input.amount, 0n);
+        let finalOutputSats = outputSats;
+        let changeSats = totalInputSats - finalOutputSats - feeSats;
+
+        if (changeSats < 0n) {
+            finalOutputSats = totalInputSats - feeSats;
+            changeSats = 0n;
+        }
+
+        // 1. Add HTLC contract output
+        tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), finalOutputSats);
+
+        // 2. Add change output if there's leftover change and a change address is provided
+        if (changeSats > 0n && changeAddr) {
+            tx.addOutput(bitcoin.address.toOutputScript(changeAddr, network), changeSats);
+        }
+
+        // Prepare the inputs' output scripts and amounts array for the witness signature sighash
+        const prevOutScripts = inputs.map(input => input.paymentOutput);
+        const prevAmounts = inputs.map(input => input.amount);
+
+        // Generate signatures and set witness for each input
+        for (let i = 0; i < inputs.length; i++) {
+            const input = inputs[i];
+            const sighash = tx.hashForWitnessV1(
+                i, prevOutScripts, prevAmounts, bitcoin.Transaction.SIGHASH_DEFAULT
+            );
+
+            // Sign the funding spend (P2TR Keypath spend with the given merkleRoot tweak)
+            const tweakedPair = this.getTweakedKeyPair(input.keyPair, input.merkleRoot, network);
+            const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
+
+            tx.setWitness(i, [sig]);
+        }
+
+        return tx;
+    }
+
+    /**
      * Builds and signs an HTLC claim transaction spending via the ClaimLeaf scriptpath.
      */
     static buildHtlcClaimTx(

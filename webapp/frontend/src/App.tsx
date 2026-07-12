@@ -328,39 +328,57 @@ export default function App() {
     return list;
   };
 
-  // Helper to get matching split UTXO on the other chain for taker to accept an offer
-  const getMatchingTakerUtxo = (o: Offer): UTXO | null => {
-    console.log("getMatchingTakerUtxo - Offer ID:", o.id, "BackingChain:", o.backingChain, "B110Amount:", o.initiatorB110Amount, "BtcAmount:", o.acceptorBtcAmount);
-    console.log("Taker Split UTXOs - BTC (ownMainUtxos):", ownMainUtxos);
-    console.log("Taker Split UTXOs - BIP110 (ownBip110Utxos):", ownBip110Utxos);
-    console.log("Taker Split UTXOs - BIP110 on splitAddress (isBip110UtxoSplit):", bip110Utxos.filter(u => isBip110UtxoSplit(u)));
+  // Helper to get matching split UTXOs (possibly multiple) on the other chain for taker to accept an offer
+  const getMatchingTakerUtxos = (o: Offer): UTXO[] => {
+    let availableUtxos: UTXO[] = [];
+    let targetAmount = 0;
 
     if (o.backingChain === 'bip110') {
-      const match = ownMainUtxos.find(u => u.amount >= o.acceptorBtcAmount);
-      return match || null;
+      availableUtxos = ownMainUtxos;
+      targetAmount = o.acceptorBtcAmount;
     } else if (o.backingChain === 'main') {
       const splitBip110Utxos = [
         ...ownBip110Utxos,
         ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
       ];
-      // De-duplicate if any overlap
-      const uniqueBip110Utxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
-      const match = uniqueBip110Utxos.find(u => u.amount >= o.initiatorB110Amount);
-      return match || null;
+      availableUtxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
+      targetAmount = o.initiatorB110Amount;
     } else {
-      // Robust Fallback (for older offers without backingChain explicitly populated)
-      // Check if taker has a matching split UTXO on EITHER chain!
-      const btcMatch = ownMainUtxos.find(u => u.amount >= o.acceptorBtcAmount);
-      if (btcMatch) return btcMatch;
-
-      const splitBip110Utxos = [
-        ...ownBip110Utxos,
-        ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
-      ];
-      const uniqueBip110Utxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
-      const b110Match = uniqueBip110Utxos.find(u => u.amount >= o.initiatorB110Amount);
-      return b110Match || null;
+      // Fallback
+      const btcTotal = ownMainUtxos.reduce((sum, u) => sum + u.amount, 0);
+      if (btcTotal >= o.acceptorBtcAmount) {
+        availableUtxos = ownMainUtxos;
+        targetAmount = o.acceptorBtcAmount;
+      } else {
+        const splitBip110Utxos = [
+          ...ownBip110Utxos,
+          ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
+        ];
+        availableUtxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
+        targetAmount = o.initiatorB110Amount;
+      }
     }
+
+    // Sort descending to minimize inputs
+    const sorted = [...availableUtxos].sort((a, b) => b.amount - a.amount);
+    
+    const selected: UTXO[] = [];
+    let currentSum = 0;
+    for (const utxo of sorted) {
+      selected.push(utxo);
+      currentSum += utxo.amount;
+      if (currentSum >= targetAmount) {
+        return selected;
+      }
+    }
+    
+    return []; // Not enough total balance
+  };
+
+  // Helper to get matching split UTXO on the other chain for taker to accept an offer
+  const getMatchingTakerUtxo = (o: Offer): UTXO | null => {
+    const selected = getMatchingTakerUtxos(o);
+    return selected.length > 0 ? selected[0] : null;
   };
 
   const getActiveStepUtxo = (step: number): any => {
@@ -1712,60 +1730,99 @@ export default function App() {
         );
 
         // 2. Fetch split outputs of acceptor on targetChain
-        let utxo;
+        let candidates: UTXO[] = [];
         if (targetChain === 'main') {
           const splitDestRes = await axios.post(`${API_BASE}/wallet/utxos`, {
             address: ownAddress,
             chain: 'main',
             networkMode
           });
-          utxo = splitDestRes.data.utxos[0];
+          candidates = splitDestRes.data.utxos;
         } else {
           const splitB110Utxos = [
             ...ownBip110Utxos,
             ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
           ];
-          const uniqueBip110Utxos = splitB110Utxos.filter((v: any, i: any, a: any) => a.findIndex((t: any) => t.txid === v.txid && t.vout === v.vout) === i);
-          utxo = uniqueBip110Utxos[0];
+          candidates = splitB110Utxos.filter((v: any, i: any, a: any) => a.findIndex((t: any) => t.txid === v.txid && t.vout === v.vout) === i);
         }
 
-        if (!utxo) throw new Error(`No split UTXO found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! Split your coins first.`);
+        // Sort candidates descending by amount to minimize the number of inputs used
+        const sortedCandidates = [...candidates].sort((a, b) => b.amount - a.amount);
 
-        // 3. Build & sign funding transaction locally!
-        const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
-        const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
-        const splitDestPubKey = Buffer.from(keyPair.publicKey);
-        
-        let splitDestPayment: bitcoin.payments.Payment;
-        let merkleRoot: Buffer = Buffer.alloc(0);
-        
-        const isParentSplitAddress = (targetChain === 'bip110') && !ownBip110Utxos.some(u => u.txid === utxo!.txid && u.vout === utxo!.vout);
-        if (isParentSplitAddress) {
-          const splitPayment = PureBitcoinSwap.createSplitPayment(splitDestPubKey, net);
-          splitDestPayment = splitPayment.payment;
-          merkleRoot = splitPayment.leafHash;
-        } else {
-          splitDestPayment = bitcoin.payments.p2tr({
-            internalPubkey: PureBitcoinSwap.getXOnlyPubKey(splitDestPubKey),
-            network: net
-          });
+        // Select enough UTXOs to cover targetAmount + estimated fee
+        let selectedUtxos: UTXO[] = [];
+        let totalInputSats = 0n;
+        const targetSats = BigInt(targetAmount);
+        const selectionFeeBuffer = 10000n;
+
+        for (const u of sortedCandidates) {
+          selectedUtxos.push(u);
+          totalInputSats += BigInt(u.amount);
+          if (totalInputSats >= targetSats + selectionFeeBuffer) {
+            break;
+          }
         }
 
-        const hasChange = BigInt(utxo.amount) > BigInt(targetAmount) + 5000n;
-        const feeSats = await calculateTxFee('funding', hasChange);
+        if (selectedUtxos.length === 0 || totalInputSats < targetSats + 5000n) {
+          throw new Error(`Insufficient split UTXOs found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! You need a total balance of at least ${(Number(targetSats + 10000n) / 100000000).toFixed(4)} to accept and fund this contract.`);
+        }
+
+        const hasChange = totalInputSats > targetSats + 5000n;
+        let feeSats = BigInt(await calculateTxFee('funding', hasChange));
+        
+        // Dynamic fee adjustment for multiple inputs (68 vbytes per extra input)
+        if (selectedUtxos.length > 1) {
+          if (networkMode === 'regtest') {
+            feeSats += BigInt(1000 * (selectedUtxos.length - 1));
+          } else {
+            let rate = 15;
+            try {
+              const feeRes = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 1500 });
+              rate = Number(feeRes.data.halfHourFee || feeRes.data.hourFee || 15);
+            } catch (e) {}
+            feeSats += BigInt(68 * (selectedUtxos.length - 1) * rate);
+          }
+        }
+
         const changeAddress = hasChange ? getNewChangeAddress(net) : undefined;
 
-        const tx = PureBitcoinSwap.buildHtlcFundingTx(
-          keyPair,
-          utxo.txid,
-          utxo.vout,
-          BigInt(utxo.amount),
-          BigInt(targetAmount),
+        // 3. Build & sign funding transaction locally with multiple inputs!
+        const inputsData = selectedUtxos.map(utxo => {
+          const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
+          const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
+          const splitDestPubKey = Buffer.from(keyPair.publicKey);
+
+          let splitDestPayment: bitcoin.payments.Payment;
+          let merkleRoot: Buffer = Buffer.alloc(0);
+
+          const isParentSplitAddress = (targetChain === 'bip110') && !ownBip110Utxos.some(u => u.txid === utxo.txid && u.vout === utxo.vout);
+          if (isParentSplitAddress) {
+            const splitPayment = PureBitcoinSwap.createSplitPayment(splitDestPubKey, net);
+            splitDestPayment = splitPayment.payment;
+            merkleRoot = splitPayment.leafHash;
+          } else {
+            splitDestPayment = bitcoin.payments.p2tr({
+              internalPubkey: PureBitcoinSwap.getXOnlyPubKey(splitDestPubKey),
+              network: net
+            });
+          }
+
+          return {
+            txid: utxo.txid,
+            vout: utxo.vout,
+            amount: BigInt(utxo.amount),
+            keyPair,
+            merkleRoot,
+            paymentOutput: splitDestPayment.output!
+          };
+        });
+
+        const tx = PureBitcoinSwap.buildMultiInputHtlcFundingTx(
+          inputsData,
+          targetSats,
           htlc.address!,
-          splitDestPayment,
-          merkleRoot,
           changeAddress,
-          BigInt(feeSats),
+          feeSats,
           net
         );
 
