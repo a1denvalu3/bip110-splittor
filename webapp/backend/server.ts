@@ -290,9 +290,25 @@ async function getTxConfirmations(
 app.get('/api/offers', async (req: Request, res: Response) => {
     const mode = NETWORK_MODE;
     try {
-        const fetchedOffers = await getOffersByMode(mode);
+        const page = req.query.page ? Number(req.query.page) : undefined;
+        const limit = req.query.limit ? Number(req.query.limit) : undefined;
+        const orderBy = req.query.orderBy as 'premium' | 'amount' | 'createdAt' | undefined;
+        const orderDir = req.query.orderDir as 'asc' | 'desc' | undefined;
+        const excludePubKey = req.query.excludePubKey as string | undefined;
+        const initiatorPubKey = req.query.initiatorPubKey as string | undefined;
+        const acceptorPubKey = req.query.acceptorPubKey as string | undefined;
 
-        const updatedOffers = await Promise.all(fetchedOffers.map(async o => {
+        const paginatedResult = await getOffersByMode(mode, { 
+            page, 
+            limit, 
+            orderBy, 
+            orderDir, 
+            excludePubKey, 
+            initiatorPubKey, 
+            acceptorPubKey 
+        });
+
+        const updatedOffers = await Promise.all(paginatedResult.offers.map(async o => {
             let isPending = false;
             
             // 1. Check if the backing split UTXO is confirmed
@@ -308,12 +324,20 @@ app.get('/api/offers', async (req: Request, res: Response) => {
             
             // 2. Check if the active Escrow funding transactions are confirmed
             if (!isPending) {
-                if (o.status === 'FUNDED_INITIATOR' && o.b110HtlcTxid) {
-                    const confs = await getTxConfirmations(o.b110HtlcTxid, 'bip110', mode);
-                    if (confs < 1) isPending = true;
-                } else if (o.status === 'FUNDED_ACCEPTOR' && o.btcHtlcTxid) {
-                    const confs = await getTxConfirmations(o.btcHtlcTxid, 'main', mode);
-                    if (confs < 1) isPending = true;
+                if (o.status === 'FUNDED_INITIATOR') {
+                    const initTxid = o.backingChain === 'main' ? o.btcHtlcTxid : o.b110HtlcTxid;
+                    const initChain = o.backingChain === 'main' ? 'main' : 'bip110';
+                    if (initTxid) {
+                        const confs = await getTxConfirmations(initTxid, initChain, mode);
+                        if (confs < 1) isPending = true;
+                    }
+                } else if (o.status === 'FUNDED_ACCEPTOR') {
+                    const accTxid = o.backingChain === 'main' ? o.b110HtlcTxid : o.btcHtlcTxid;
+                    const accChain = o.backingChain === 'main' ? 'bip110' : 'main';
+                    if (accTxid) {
+                        const confs = await getTxConfirmations(accTxid, accChain, mode);
+                        if (confs < 1) isPending = true;
+                    }
                 }
             }
             
@@ -333,7 +357,13 @@ app.get('/api/offers', async (req: Request, res: Response) => {
             };
         }));
 
-        res.json(updatedOffers);
+        res.json({
+            offers: updatedOffers,
+            total: paginatedResult.total,
+            page: paginatedResult.page,
+            limit: paginatedResult.limit,
+            totalPages: paginatedResult.totalPages
+        });
     } catch (err: any) {
         res.status(500).json({ error: "Failed to load offers from database: " + err.message });
     }
@@ -564,8 +594,9 @@ app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Only accepted offers that have not locked funds can walk back acceptance." });
         }
 
-        // If b110HtlcTxid is already filled, initiator has already locked funds
-        if (offer.b110HtlcTxid) {
+        // If initiator has already locked funds on their respective backing chain, cannot walk back
+        const initiatorFunded = offer.backingChain === 'main' ? offer.btcHtlcTxid : offer.b110HtlcTxid;
+        if (initiatorFunded) {
             return res.status(400).json({ error: "Initiator has already funded the HTLC. Cannot walk back acceptance." });
         }
 

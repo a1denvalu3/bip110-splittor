@@ -22,11 +22,84 @@ export interface DbOffer {
     acceptorClaimed?: number; // 0 or 1
 }
 
-export async function getOffersByMode(mode: 'mainnet' | 'regtest'): Promise<DbOffer[]> {
-    return dbAll(
-        "SELECT * FROM offers WHERE networkMode = ? ORDER BY createdAt DESC",
-        [mode]
+export interface GetOffersOptions {
+    page?: number;
+    limit?: number;
+    orderBy?: 'premium' | 'amount' | 'createdAt';
+    orderDir?: 'asc' | 'desc';
+    excludePubKey?: string;
+    initiatorPubKey?: string;
+    acceptorPubKey?: string;
+}
+
+export interface PaginatedOffers {
+    offers: DbOffer[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+}
+
+export async function getOffersByMode(
+    mode: 'mainnet' | 'regtest',
+    options: GetOffersOptions = {}
+): Promise<PaginatedOffers> {
+    const page = options.page && options.page > 0 ? Number(options.page) : 1;
+    const limit = options.limit && options.limit > 0 ? Number(options.limit) : 10;
+    const offset = (page - 1) * limit;
+
+    const allowedOrderBy = ['premium', 'amount', 'createdAt'];
+    const allowedOrderDir = ['asc', 'desc'];
+
+    const orderField = options.orderBy && allowedOrderBy.includes(options.orderBy) ? options.orderBy : 'createdAt';
+    const orderDirection = options.orderDir && allowedOrderDir.includes(options.orderDir) ? options.orderDir : 'desc';
+
+    let sqlOrderBy = '';
+    if (orderField === 'premium') {
+        sqlOrderBy = `CASE WHEN backingChain = 'main' THEN ((initiatorB110Amount * 1.0 / acceptorBtcAmount) - 1.0) * 100.0
+                           ELSE ((acceptorBtcAmount * 1.0 / initiatorB110Amount) - 1.0) * 100.0
+                      END`;
+    } else if (orderField === 'amount') {
+        sqlOrderBy = `CASE WHEN backingChain = 'main' THEN acceptorBtcAmount ELSE initiatorB110Amount END`;
+    } else {
+        sqlOrderBy = 'createdAt';
+    }
+
+    let whereClause = "WHERE networkMode = ?";
+    const whereParams: any[] = [mode];
+
+    if (options.excludePubKey) {
+        whereClause += " AND initiatorPubKey != ?";
+        whereParams.push(options.excludePubKey);
+    }
+    if (options.initiatorPubKey) {
+        whereClause += " AND initiatorPubKey = ?";
+        whereParams.push(options.initiatorPubKey);
+    }
+    if (options.acceptorPubKey) {
+        whereClause += " AND acceptorPubKey = ?";
+        whereParams.push(options.acceptorPubKey);
+    }
+
+    const countResult = await dbGet(
+        `SELECT COUNT(*) as count FROM offers ${whereClause}`,
+        whereParams
     );
+    const total = countResult ? countResult.count : 0;
+
+    const queryParams = [...whereParams, limit, offset];
+    const offers = await dbAll(
+        `SELECT * FROM offers ${whereClause} ORDER BY ${sqlOrderBy} ${orderDirection.toUpperCase()} LIMIT ? OFFSET ?`,
+        queryParams
+    );
+
+    return {
+        offers,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+    };
 }
 
 export async function getOfferById(id: string): Promise<DbOffer | null> {

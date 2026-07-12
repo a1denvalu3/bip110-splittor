@@ -197,8 +197,21 @@ export default function App() {
   const [faucetLoading, setFaucetLoading] = useState<Record<string, boolean>>({});
 
   // Marketplace State
-  const [offersList, setOffersList] = useState<Offer[]>([]);
+  const [marketplaceOffers, setMarketplaceOffers] = useState<Offer[]>([]);
+  const [myCreatedOffers, setMyCreatedOffers] = useState<Offer[]>([]);
+  const [myAcceptedOffers, setMyAcceptedOffers] = useState<Offer[]>([]);
   const [selectedOffer, setSelectedOffer] = useState<Offer | null>(null);
+  const [offersPage, setOffersPage] = useState<number>(1);
+  const [offersLimit, setOffersLimit] = useState<number>(10);
+  const [offersOrderBy, setOffersOrderBy] = useState<'premium' | 'amount' | 'createdAt'>('createdAt');
+  const [offersOrderDir, setOffersOrderDir] = useState<'asc' | 'desc'>('desc');
+  const [offersTotal, setOffersTotal] = useState<number>(0);
+  const [offersTotalPages, setOffersTotalPages] = useState<number>(1);
+
+  const offersList = React.useMemo(() => {
+    const all = [...marketplaceOffers, ...myCreatedOffers, ...myAcceptedOffers];
+    return all.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+  }, [marketplaceOffers, myCreatedOffers, myAcceptedOffers]);
   
   // Offer Form
   const [newOfferB110, setNewOfferB110] = useState<string>(''); // Auto-calculated from split UTXO
@@ -428,12 +441,8 @@ export default function App() {
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
         
         // Reconstruct the HTLC payment details
-        const recipientPubKey = isBtcBacking 
-          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
-          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
-        const refundPubKey = isBtcBacking 
-          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
-          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const recipientPubKey = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const refundPubKey = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
 
         const keyPair = getKeyPairForPubKey(Buffer.from(refundPubKey).toString('hex'), net);
 
@@ -503,12 +512,8 @@ export default function App() {
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
         
         // Reconstruct second HTLC payment details
-        const secondHtlcRecipient = isBtcBacking 
-          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
-          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
-        const secondHtlcRefund = isBtcBacking 
-          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
-          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const secondHtlcRecipient = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const secondHtlcRefund = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
 
         const keyPair = getKeyPairForPubKey(Buffer.from(secondHtlcRefund).toString('hex'), net);
 
@@ -855,8 +860,12 @@ export default function App() {
     setOwnAddress(activeKeys.ownAddress);
 
     fetchNodeInfo();
-    fetchOffers();
   }, [networkMode]);
+
+  // Fetch offers immediately whenever pagination/sorting or networkMode changes
+  useEffect(() => {
+    fetchOffers();
+  }, [networkMode, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
 
   // Sync balances and UTXOs when splitAddress, ownAddress or activeTab/networkMode changes
   useEffect(() => {
@@ -876,7 +885,7 @@ export default function App() {
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [networkMode, splitAddress, ownAddress]);
+  }, [networkMode, splitAddress, ownAddress, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
 
   // Keep selectedOffer in sync with the polled offersList to transition wizard steps in real-time
   useEffect(() => {
@@ -1051,8 +1060,31 @@ export default function App() {
 
   const fetchOffers = async () => {
     try {
-      const res = await axios.get(`${API_BASE}/offers?networkMode=${networkMode}`);
-      setOffersList(res.data);
+      // 1. Fetch Marketplace Offers (others' offers)
+      const excludeParam = publicKey ? `&excludePubKey=${publicKey}` : '';
+      const marketplaceRes = await axios.get(
+        `${API_BASE}/offers?networkMode=${networkMode}${excludeParam}&page=${offersPage}&limit=${offersLimit}&orderBy=${offersOrderBy}&orderDir=${offersOrderDir}`
+      );
+      setMarketplaceOffers(marketplaceRes.data.offers);
+      setOffersTotal(marketplaceRes.data.total);
+      setOffersTotalPages(marketplaceRes.data.totalPages);
+
+      if (publicKey) {
+        // 2. Fetch My Created Offers
+        const createdRes = await axios.get(
+          `${API_BASE}/offers?networkMode=${networkMode}&initiatorPubKey=${publicKey}&limit=100`
+        );
+        setMyCreatedOffers(createdRes.data.offers);
+
+        // 3. Fetch My Accepted Offers
+        const acceptedRes = await axios.get(
+          `${API_BASE}/offers?networkMode=${networkMode}&acceptorPubKey=${publicKey}&limit=100`
+        );
+        setMyAcceptedOffers(acceptedRes.data.offers);
+      } else {
+        setMyCreatedOffers([]);
+        setMyAcceptedOffers([]);
+      }
     } catch (err: any) {
       console.error(err);
     }
@@ -1521,12 +1553,8 @@ export default function App() {
         showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
         
         // 1. Generate HTLC outputs locally
-        const recipientPubKey = isBtcBacking 
-          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
-          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
-        const refundPubKey = isBtcBacking 
-          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
-          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const recipientPubKey = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const refundPubKey = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
 
         const htlc = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
@@ -1626,12 +1654,8 @@ export default function App() {
 
         // Security check first: Verify the initiator's first HTLC address matches the expected script
         const firstHtlcAddress = isBtcBacking ? selectedOffer.btcHtlcAddress! : selectedOffer.b110HtlcAddress!;
-        const firstHtlcRecipient = isBtcBacking 
-          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
-          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
-        const firstHtlcRefund = isBtcBacking 
-          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
-          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const firstHtlcRecipient = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const firstHtlcRefund = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
 
         showToast(`Verifying initiator's ${isBtcBacking ? 'BTC' : 'BIP110'} HTLC address first...`, 'info');
 
@@ -1652,12 +1676,8 @@ export default function App() {
         showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
 
         // 1. Generate second HTLC outputs locally
-        const secondHtlcRecipient = isBtcBacking 
-          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
-          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
-        const secondHtlcRefund = isBtcBacking 
-          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
-          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const secondHtlcRecipient = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const secondHtlcRefund = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
 
         const htlc = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
@@ -1749,12 +1769,8 @@ export default function App() {
         showToast(`Verifying acceptor's ${targetChain === 'main' ? 'BTC' : 'BIP110'} HTLC address first...`, 'info');
 
         // Security check: Verify that the acceptor's HTLC address matches the expected script
-        const secondHtlcRecipient = isBtcBacking 
-          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
-          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
-        const secondHtlcRefund = isBtcBacking 
-          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
-          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const secondHtlcRecipient = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const secondHtlcRefund = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
 
         const isSecondHtlcValid = PureBitcoinSwap.verifyTaprootHtlcAddress(
           targetAddress,
@@ -1844,12 +1860,8 @@ export default function App() {
         showToast(`Verifying ${targetChain === 'main' ? 'BTC' : 'BIP110'} HTLC address first...`, 'info');
 
         // Security check: Verify that the first HTLC address matches the expected script
-        const firstHtlcRecipient = isBtcBacking 
-          ? Buffer.from(selectedOffer.initiatorPubKey, 'hex') 
-          : Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
-        const firstHtlcRefund = isBtcBacking 
-          ? Buffer.from(selectedOffer.acceptorPubKey!, 'hex') 
-          : Buffer.from(selectedOffer.initiatorPubKey, 'hex');
+        const firstHtlcRecipient = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const firstHtlcRefund = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
 
         const isFirstHtlcValid = PureBitcoinSwap.verifyTaprootHtlcAddress(
           targetAddress,
@@ -3107,13 +3119,63 @@ export default function App() {
                 Accept swap offers published by other counterparties.
               </p>
 
+              {/* Sorting and Page Size Controls */}
+              <div className="flex flex-col sm:flex-row gap-4 mb-6 justify-between items-start sm:items-center text-xs">
+                <div className="flex flex-wrap gap-3 items-center">
+                  <span className="text-slate-400 font-medium">Sort By:</span>
+                  <select
+                    value={offersOrderBy}
+                    onChange={(e) => {
+                      setOffersOrderBy(e.target.value as any);
+                      setOffersPage(1); // Reset to page 1 on sort change
+                    }}
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-300 focus:outline-none focus:border-slate-700 font-medium"
+                  >
+                    <option value="createdAt">Date Created</option>
+                    <option value="premium">Premium Size</option>
+                    <option value="amount">Amount Size</option>
+                  </select>
+
+                  <select
+                    value={offersOrderDir}
+                    onChange={(e) => {
+                      setOffersOrderDir(e.target.value as any);
+                      setOffersPage(1); // Reset to page 1 on direction change
+                    }}
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-300 focus:outline-none focus:border-slate-700 font-medium"
+                  >
+                    <option value="desc">Descending</option>
+                    <option value="asc">Ascending</option>
+                  </select>
+
+                  <span className="text-slate-400 font-medium ml-2">Show:</span>
+                  <select
+                    value={offersLimit}
+                    onChange={(e) => {
+                      setOffersLimit(Number(e.target.value));
+                      setOffersPage(1); // Reset to page 1 on limit change
+                    }}
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-300 focus:outline-none focus:border-slate-700 font-medium"
+                  >
+                    <option value={5}>5 per page</option>
+                    <option value={10}>10 per page</option>
+                    <option value={20}>20 per page</option>
+                    <option value={50}>50 per page</option>
+                  </select>
+                </div>
+
+                <div className="text-slate-400 font-medium">
+                  Total found: <span className="text-slate-200 font-bold">{offersTotal}</span>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {offersList.filter(o => o.initiatorPubKey !== publicKey).length === 0 ? (
+                {marketplaceOffers.length === 0 ? (
                   <div className="col-span-2 text-center py-12 text-slate-500 border border-dashed border-slate-800 rounded-2xl bg-slate-950/20 text-xs">
                     No other sellers' offers found in the orderbook.
                   </div>
                 ) : (
-                  offersList.filter(o => o.initiatorPubKey !== publicKey).map((o) => {
+                  marketplaceOffers.map((o) => {
                     const match = getMatchingTakerUtxo(o);
                     const requiredChain = (!o.backingChain || o.backingChain === 'bip110') ? 'BTC' : 'BIP110';
                     const requiredAmount = (!o.backingChain || o.backingChain === 'bip110') ? o.acceptorBtcAmount : o.initiatorB110Amount;
@@ -3201,6 +3263,29 @@ export default function App() {
                   })
                 )}
               </div>
+
+              {/* Pagination Controls */}
+              {offersTotalPages > 1 && (
+                <div className="flex justify-center items-center gap-4 mt-8 pt-6 border-t border-slate-900 text-xs">
+                  <button
+                    disabled={offersPage === 1}
+                    onClick={() => setOffersPage(prev => Math.max(prev - 1, 1))}
+                    className="px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-900 transition-all font-semibold"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-slate-400 font-semibold">
+                    Page <span className="text-slate-200">{offersPage}</span> of <span className="text-slate-200">{offersTotalPages}</span>
+                  </span>
+                  <button
+                    disabled={offersPage === offersTotalPages}
+                    onClick={() => setOffersPage(prev => Math.min(prev + 1, offersTotalPages))}
+                    className="px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-900 transition-all font-semibold"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
             </CollapsibleCard>
           </div>
         )}
@@ -3368,8 +3453,8 @@ export default function App() {
                           </div>
                           <div className="flex justify-between">
                             <span className="text-slate-500 font-medium">Escrow Status:</span>
-                            <span className={`font-semibold ${o.b110HtlcTxid ? 'text-emerald-400' : 'text-amber-500 animate-pulse'}`}>
-                              {o.b110HtlcTxid ? '✔️ Initiator Escrow Funded' : '⏳ Waiting for Initiator to lock funds'}
+                            <span className={`font-semibold ${(o.backingChain === 'main' ? o.btcHtlcTxid : o.b110HtlcTxid) ? 'text-emerald-400' : 'text-amber-500 animate-pulse'}`}>
+                              {(o.backingChain === 'main' ? o.btcHtlcTxid : o.b110HtlcTxid) ? '✔️ Initiator Escrow Funded' : '⏳ Waiting for Initiator to lock funds'}
                             </span>
                           </div>
                         </div>
@@ -3387,7 +3472,7 @@ export default function App() {
                           Open Swap Wizard
                         </button>
                         
-                        {o.status === 'ACCEPTED' && !o.b110HtlcTxid && (
+                        {o.status === 'ACCEPTED' && !(o.backingChain === 'main' ? o.btcHtlcTxid : o.b110HtlcTxid) && (
                           <button
                             onClick={() => handleWalkbackAcceptance(o)}
                             className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-amber-950/40 hover:bg-amber-900/60 border border-amber-900/40 text-amber-400 transition-all flex items-center justify-center gap-1"

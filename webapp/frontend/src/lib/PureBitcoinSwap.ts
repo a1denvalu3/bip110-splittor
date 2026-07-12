@@ -457,6 +457,8 @@ export class PureBitcoinSwap {
 
                 const controlBlock = splitPaymentInfo.payment.witness![1];
                 tx.setWitness(0, [
+                    sig,
+                    Buffer.alloc(0), // isBip110 = false (takes the OP_ELSE branch)
                     splitPaymentInfo.script,
                     controlBlock
                 ]);
