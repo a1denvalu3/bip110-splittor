@@ -217,7 +217,7 @@ export default function App() {
   const [newOfferB110, setNewOfferB110] = useState<string>(''); // Auto-calculated from split UTXO
   const [newOfferBtc, setNewOfferBtc] = useState<string>('50000000'); // 0.5 BTC
   const [newOfferPreimage, setNewOfferPreimage] = useState<string>('secret-swap-preimage-proof');
-  const [newOfferLocktime, setNewOfferLocktime] = useState<string>('2000');
+  const [newOfferLocktime, setNewOfferLocktime] = useState<string>('1008');
   const [sellAmountSats, setSellAmountSats] = useState<string>('');
   const [premiumPercent, setPremiumPercent] = useState<string>('0');
   const [publishing, setPublishing] = useState<boolean>(false);
