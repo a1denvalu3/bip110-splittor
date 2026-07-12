@@ -1434,7 +1434,7 @@ export default function App() {
       signer: signerRole,
       signature
     });
-    return res.data;
+    return res;
   };
 
   const handleCreateOffer = async (e: React.FormEvent) => {
@@ -1712,10 +1712,21 @@ export default function App() {
         const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
         const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
         const splitDestPubKey = Buffer.from(keyPair.publicKey);
-        const splitDestPayment = bitcoin.payments.p2tr({
-          internalPubkey: PureBitcoinSwap.getXOnlyPubKey(splitDestPubKey),
-          network: net
-        });
+        
+        let splitDestPayment: bitcoin.payments.Payment;
+        let merkleRoot: Buffer = Buffer.alloc(0);
+        
+        const isParentSplitAddress = (targetChain === 'bip110') && !ownBip110Utxos.some(u => u.txid === utxo!.txid && u.vout === utxo!.vout);
+        if (isParentSplitAddress) {
+          const splitPayment = PureBitcoinSwap.createSplitPayment(splitDestPubKey, net);
+          splitDestPayment = splitPayment.payment;
+          merkleRoot = splitPayment.leafHash;
+        } else {
+          splitDestPayment = bitcoin.payments.p2tr({
+            internalPubkey: PureBitcoinSwap.getXOnlyPubKey(splitDestPubKey),
+            network: net
+          });
+        }
 
         const hasChange = BigInt(utxo.amount) > BigInt(targetAmount) + 5000n;
         const feeSats = await calculateTxFee('funding', hasChange);
@@ -1729,7 +1740,7 @@ export default function App() {
           BigInt(targetAmount),
           htlc.address!,
           splitDestPayment,
-          Buffer.alloc(0),
+          merkleRoot,
           changeAddress,
           BigInt(feeSats),
           net
