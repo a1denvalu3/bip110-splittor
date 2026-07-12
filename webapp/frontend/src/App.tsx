@@ -237,6 +237,23 @@ export default function App() {
     return networkMode === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
   };
 
+  const formatLockTimeDisplay = (lockTime: number, isHalf: boolean = false, backingChain: 'main' | 'bip110' = 'main') => {
+    const currentHeight = backingChain === 'main' ? nodeInfo.mainHeight : nodeInfo.bip110Height;
+    const targetHeight = isHalf ? Math.round(lockTime / 2) : lockTime;
+    
+    if (currentHeight <= 0) {
+      return `Block #${targetHeight}`;
+    }
+    
+    const blocksRemaining = targetHeight - currentHeight;
+    if (blocksRemaining <= 0) {
+      return `Block #${targetHeight} (Expired)`;
+    }
+    
+    const hours = ((blocksRemaining * 10) / 60).toFixed(1);
+    return `Block #${targetHeight} (~${blocksRemaining} blks remaining / ~${hours} hrs)`;
+  };
+
   // Helper to determine if a split contract UTXO is unsplit (valid on both chains)
   const isUtxoUnsplit = (u: UTXO): boolean => {
     return mainUtxos.some(mainU => mainU.txid === u.txid && mainU.vout === u.vout) &&
@@ -1484,12 +1501,18 @@ export default function App() {
       const hashBuffer = await window.crypto.subtle.digest('SHA-256', preimageBytes as any);
       const hashLockHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 
+      const baseHeight = backingChain === 'main' ? nodeInfo.mainHeight : nodeInfo.bip110Height;
+      if (!baseHeight || baseHeight <= 0) {
+        throw new Error(`Cannot determine current block height for ${backingChain === 'main' ? 'Bitcoin' : 'BIP110'} chain. Please wait for node info to sync.`);
+      }
+      const absoluteLockTime = baseHeight + Number(newOfferLocktime);
+
       const res = await axios.post(`${API_BASE}/offers`, {
         initiatorPubKey: publicKey,
         initiatorB110Amount: Number(newOfferB110),
         acceptorBtcAmount: Number(newOfferBtc),
         hashLock: hashLockHex,
-        lockTime: Number(newOfferLocktime),
+        lockTime: absoluteLockTime,
         networkMode,
         backingTxid,
         backingVout,
@@ -3238,7 +3261,7 @@ export default function App() {
                             <div className="flex justify-between">
                               <span className="text-slate-500 font-medium">Refund Locktime (T):</span>
                               <span className="font-semibold text-amber-500">
-                                {o.lockTime} blocks (~{((o.lockTime * 10) / 60).toFixed(1)} hrs)
+                                {formatLockTimeDisplay(o.lockTime, false, o.backingChain || 'main')}
                               </span>
                             </div>
                             <div className="flex justify-between">
@@ -3358,11 +3381,11 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
+                         <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
                           <div className="flex justify-between">
                             <span className="text-slate-500 font-medium">Refund Locktime (T):</span>
                             <span className="font-semibold text-amber-500">
-                              {o.lockTime} blocks (~{((o.lockTime * 10) / 60).toFixed(1)} hrs)
+                              {formatLockTimeDisplay(o.lockTime, false, o.backingChain || 'main')}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -3455,11 +3478,11 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
+                         <div className="text-[10px] space-y-1.5 border-t border-slate-900 pt-3">
                           <div className="flex justify-between">
                             <span className="text-slate-500 font-medium">Refund Locktime (T/2):</span>
                             <span className="font-semibold text-amber-500">
-                              {o.lockTime / 2} blocks (~{(((o.lockTime / 2) * 10) / 60).toFixed(1)} hrs)
+                              {formatLockTimeDisplay(o.lockTime, true, o.backingChain || 'main')}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -3539,9 +3562,9 @@ export default function App() {
                       <span className="text-sm font-bold text-emerald-400">{(selectedOffer.acceptorBtcAmount / 100000000).toFixed(4)} BTC</span>
                     </div>
                     <div className="bg-slate-950 border border-slate-850 px-4 py-2.5 rounded-xl text-center">
-                      <span className="text-[10px] text-slate-500 uppercase block font-semibold">Locktime (T / T/2)</span>
+                      <span className="text-[10px] text-slate-500 uppercase block font-semibold">Refund Height (T / T/2)</span>
                       <span className="text-sm font-bold text-amber-500">
-                        {selectedOffer.lockTime} / {selectedOffer.lockTime / 2} blocks
+                        #{selectedOffer.lockTime} / #{Math.round(selectedOffer.lockTime / 2)}
                       </span>
                     </div>
                   </div>
