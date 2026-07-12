@@ -260,17 +260,17 @@ async function getTxConfirmations(
     if (mode === 'mainnet') {
         if (chain === 'main') {
             try {
-                const url = `https://mempool.space/api/tx/${txid}/status`;
+                const url = `https://mempool.space/api/tx/${txid}`;
                 const response = await axios.get(url, { timeout: 3000 });
-                return response.data.confirmed ? 1 : 0;
+                return response.data.status?.confirmed ? 1 : 0;
             } catch {
                 return 0;
             }
         } else {
             try {
-                const url = `${BIP110_EXPLORER_URL}/api/tx/${txid}/status`;
+                const url = `${BIP110_EXPLORER_URL}/api/tx/${txid}`;
                 const response = await axios.get(url, { timeout: 3000 });
-                return response.data.confirmed ? 1 : 0;
+                return response.data.status?.confirmed ? 1 : 0;
             } catch {
                 return 0;
             }
@@ -846,6 +846,37 @@ app.get('/api/config', (req: Request, res: Response) => {
     res.json({
         networkMode: NETWORK_MODE
     });
+});
+
+// 11. Fee Estimates Proxy Endpoint
+app.get('/api/fees/recommended', async (req: Request, res: Response) => {
+    const chain = req.query.chain === 'bip110' ? 'bip110' : 'main';
+
+    if (NETWORK_MODE === 'regtest') {
+        return res.json({
+            fastestFee: 15,
+            halfHourFee: 15,
+            hourFee: 15,
+            economyFee: 15,
+            minimumFee: 15
+        });
+    }
+
+    try {
+        if (chain === 'main') {
+            const response = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 3000 });
+            return res.json(response.data);
+        } else {
+            const response = await axios.get(`${BIP110_EXPLORER_URL}/api/v1/fees/recommended`, { timeout: 3000 });
+            return res.json(response.data);
+        }
+    } catch (err: any) {
+        console.error(`Failed to fetch fee estimates from chain [${chain}]:`, err.message);
+        return res.status(502).json({
+            error: "Failed to fetch fee estimates from explorer",
+            fallbackFee: 15
+        });
+    }
 });
 
 // Start the Express backend

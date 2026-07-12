@@ -491,12 +491,13 @@ export default function App() {
         );
 
         // Build and sign refund transaction
+        const refundFeeSats = await calculateTxFee('refund', false, targetChain);
         const tx = PureBitcoinSwap.buildHtlcRefundTx(
           keyPair,
           utxo.txid,
           utxo.vout,
           BigInt(utxo.amount),
-          BigInt(utxo.amount - 2000), // Standard fee deduction
+          BigInt(utxo.amount - refundFeeSats),
           ownAddress, // Refund goes back to user's safe ownAddress
           Buffer.from(selectedOffer.hashLock, 'hex'),
           recipientPubKey,
@@ -562,12 +563,13 @@ export default function App() {
         );
 
         // Build and sign refund transaction
+        const refundFeeSats = await calculateTxFee('refund', false, targetChain);
         const tx = PureBitcoinSwap.buildHtlcRefundTx(
           keyPair,
           utxo.txid,
           utxo.vout,
           BigInt(utxo.amount),
-          BigInt(utxo.amount - 2000), // Standard fee deduction
+          BigInt(utxo.amount - refundFeeSats),
           ownAddress, // Refund goes back to user's safe ownAddress
           Buffer.from(selectedOffer.hashLock, 'hex'),
           secondHtlcRecipient,
@@ -647,7 +649,11 @@ export default function App() {
   };
 
   // Dynamically calculate transaction fee in Satoshis depending on active network mode
-  const calculateTxFee = async (txType: 'split-script' | 'split-keypath' | 'funding' | 'claim' | 'refund' | 'withdraw', hasChange: boolean = false): Promise<number> => {
+  const calculateTxFee = async (
+    txType: 'split-script' | 'split-keypath' | 'funding' | 'claim' | 'refund' | 'withdraw',
+    hasChange: boolean = false,
+    chain: 'main' | 'bip110' = 'main'
+  ): Promise<number> => {
     if (networkMode === 'regtest') {
       // For regtest, we continue with standard hardcoded values for simplicity and reliability in local environments
       if (txType === 'funding') return 5000;
@@ -657,10 +663,10 @@ export default function App() {
       return 2000; // split-script / split-keypath
     }
 
-    // Mainnet Mode: Fetch feerate from mempool.space with min(5, rate) safety margin
+    // Mainnet Mode: Fetch feerate from proper backend fee proxy with min(5, rate) safety margin
     try {
-      const res = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 3000 });
-      const mempoolRate = Number(res.data.halfHourFee || res.data.hourFee || 10);
+      const res = await axios.get(`${API_BASE}/fees/recommended?chain=${chain}`, { timeout: 3000 });
+      const mempoolRate = Number(res.data.halfHourFee || res.data.hourFee || res.data.fallbackFee || 10);
       const safetyMargin = Math.min(5, mempoolRate);
       const finalRate = mempoolRate + safetyMargin;
 
@@ -688,10 +694,10 @@ export default function App() {
 
       // Calculate total fee in satoshis
       const feeSats = Math.ceil(vBytes * finalRate);
-      console.log(`[FEE-CALC] Mainnet Feerate: ${finalRate} sats/vB (including safety margin). TxType: ${txType}, size: ${vBytes} vB. Fee: ${feeSats} sats.`);
+      console.log(`[FEE-CALC] Mainnet Feerate for ${chain.toUpperCase()}: ${finalRate} sats/vB (including safety margin). TxType: ${txType}, size: ${vBytes} vB. Fee: ${feeSats} sats.`);
       return feeSats;
     } catch (err) {
-      console.warn("Mempool.space API unavailable. Falling back to safe fee rate of 15 sats/vB:", err);
+      console.warn(`Backend fee estimates proxy endpoint failed for chain [${chain}]. Falling back to safe fee rate of 15 sats/vB:`, err);
       let vBytes = 150;
       switch (txType) {
         case 'split-script': vBytes = 130; break;
@@ -1234,7 +1240,7 @@ export default function App() {
     const pubKey = Buffer.from(ownerKeyPair.publicKey);
     const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
 
-    const feeSats = await calculateTxFee('split-script');
+    const feeSats = await calculateTxFee('split-script', false, 'main');
     const inputSats = BigInt(selectedUtxoToSplit.amount);
     const fee = BigInt(feeSats);
     const outputSats = inputSats - fee;
@@ -1336,7 +1342,8 @@ export default function App() {
 
       let withdrawSats = Number(withdrawAmountSats);
       const initialEstimateHasChange = inputSats > BigInt(withdrawSats || 0) + 5000n;
-      const initialFeeSats = await calculateTxFee('withdraw', initialEstimateHasChange);
+      const targetChain = isMainChain ? 'main' : 'bip110';
+      const initialFeeSats = await calculateTxFee('withdraw', initialEstimateHasChange, targetChain);
 
       if (!withdrawSats || withdrawSats <= 0) {
         // Default to withdraw max (minus calculated dynamic fee)
@@ -1348,7 +1355,7 @@ export default function App() {
       }
 
       const finalHasChange = inputSats > BigInt(withdrawSats) + BigInt(initialFeeSats);
-      const finalFeeSats = await calculateTxFee('withdraw', finalHasChange);
+      const finalFeeSats = await calculateTxFee('withdraw', finalHasChange, targetChain);
       const changeAddress = finalHasChange ? getNewChangeAddress(net) : undefined;
 
       showToast(`Signing withdrawal from Address #${utxoIndex + 1}...`, "info");
@@ -1367,7 +1374,6 @@ export default function App() {
         net
       );
 
-      const targetChain = isMainChain ? 'main' : 'bip110';
       const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
         hex: tx.toHex(),
         chain: targetChain,
@@ -1645,7 +1651,10 @@ export default function App() {
         }
 
         const hasChange = BigInt(utxo.amount) > BigInt(targetAmount) + 5000n;
-        const feeSats = await calculateTxFee('funding', hasChange);
+        const feeSats = await calculateTxFee('funding', hasChange, targetChain);
+        if (BigInt(utxo.amount) < BigInt(targetAmount) + BigInt(feeSats)) {
+          throw new Error(`Insufficient funds in selected UTXO to cover funding amount of ${(Number(targetAmount) / 100000000).toFixed(4)} plus the transaction fee of ${(Number(feeSats) / 100000000).toFixed(8)}! Select or deposit a larger UTXO.`);
+        }
         const changeAddress = hasChange ? getNewChangeAddress(net) : undefined;
 
         const tx = PureBitcoinSwap.buildHtlcFundingTx(
@@ -1749,42 +1758,58 @@ export default function App() {
         // Sort candidates descending by amount to minimize the number of inputs used
         const sortedCandidates = [...candidates].sort((a, b) => b.amount - a.amount);
 
-        // Select enough UTXOs to cover targetAmount + estimated fee
+        // Select enough UTXOs to cover targetAmount + dynamically calculated fee
         let selectedUtxos: UTXO[] = [];
         let totalInputSats = 0n;
         const targetSats = BigInt(targetAmount);
-        const selectionFeeBuffer = 10000n;
+
+        // Estimate current fee rate for mainnet
+        let rate = 15;
+        if (networkMode === 'mainnet') {
+          try {
+            const feeRes = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 1500 });
+            rate = Number(feeRes.data.halfHourFee || feeRes.data.hourFee || 15);
+          } catch (e) {}
+        }
 
         for (const u of sortedCandidates) {
           selectedUtxos.push(u);
           totalInputSats += BigInt(u.amount);
-          if (totalInputSats >= targetSats + selectionFeeBuffer) {
+          
+          // Dynamically check if we have enough to cover target amount + fee for the current selection
+          const hasChange = totalInputSats > targetSats + 5000n;
+          let feeSats = BigInt(await calculateTxFee('funding', hasChange));
+          
+          // Dynamic fee adjustment for multiple inputs (68 vbytes per extra input)
+          if (selectedUtxos.length > 1) {
+            if (networkMode === 'regtest') {
+              feeSats += BigInt(1000 * (selectedUtxos.length - 1));
+            } else {
+              feeSats += BigInt(68 * (selectedUtxos.length - 1) * rate);
+            }
+          }
+
+          if (totalInputSats >= targetSats + feeSats) {
             break;
           }
         }
 
-        if (selectedUtxos.length === 0 || totalInputSats < targetSats + 5000n) {
-          throw new Error(`Insufficient split UTXOs found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! You need a total balance of at least ${(Number(targetSats + 10000n) / 100000000).toFixed(4)} to accept and fund this contract.`);
-        }
-
-        const hasChange = totalInputSats > targetSats + 5000n;
-        let feeSats = BigInt(await calculateTxFee('funding', hasChange));
-        
-        // Dynamic fee adjustment for multiple inputs (68 vbytes per extra input)
+        // Recalculate final fee for the selected UTXOs
+        const finalHasChange = totalInputSats > targetSats + 5000n;
+        let feeSats = BigInt(await calculateTxFee('funding', finalHasChange));
         if (selectedUtxos.length > 1) {
           if (networkMode === 'regtest') {
             feeSats += BigInt(1000 * (selectedUtxos.length - 1));
           } else {
-            let rate = 15;
-            try {
-              const feeRes = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 1500 });
-              rate = Number(feeRes.data.halfHourFee || feeRes.data.hourFee || 15);
-            } catch (e) {}
             feeSats += BigInt(68 * (selectedUtxos.length - 1) * rate);
           }
         }
 
-        const changeAddress = hasChange ? getNewChangeAddress(net) : undefined;
+        if (selectedUtxos.length === 0 || totalInputSats < targetSats + feeSats) {
+          throw new Error(`Insufficient split UTXOs found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! You need a total balance of at least ${(Number(targetSats + feeSats) / 100000000).toFixed(8)} to accept and fund this contract.`);
+        }
+
+        const changeAddress = finalHasChange ? getNewChangeAddress(net) : undefined;
 
         // 3. Build & sign funding transaction locally with multiple inputs!
         const inputsData = selectedUtxos.map(utxo => {
@@ -1908,7 +1933,7 @@ export default function App() {
           net
         );
 
-        const feeSats = await calculateTxFee('claim');
+        const feeSats = await calculateTxFee('claim', false, targetChain);
         const tx = PureBitcoinSwap.buildHtlcClaimTx(
           keyPair,
           utxo.txid,
@@ -1989,12 +2014,13 @@ export default function App() {
           net
         );
 
+        const claimFeeSats = await calculateTxFee('claim', false, targetChain);
         const tx = PureBitcoinSwap.buildHtlcClaimTx(
           keyPair,
           utxo.txid,
           utxo.vout,
           BigInt(utxo.amount),
-          BigInt(utxo.amount - 2000), 
+          BigInt(utxo.amount - claimFeeSats), 
           ownAddress, // Claim destination is user's own address!
           Buffer.from(selectedOffer.hashLock, 'hex'),
           Buffer.from(selectedOffer.preimage!, 'hex'), // preimage hex
@@ -2713,7 +2739,7 @@ export default function App() {
                     </label>
                     <select
                       value={selectedWithdrawUtxoKey}
-                      onChange={(e) => {
+                      onChange={async (e) => {
                         const key = e.target.value;
                         setSelectedWithdrawUtxoKey(key);
                         if (key) {
@@ -2722,8 +2748,11 @@ export default function App() {
                           const utxo = [...mainUtxos, ...bip110Utxos, ...ownMainUtxos, ...ownBip110Utxos]
                             .find(u => u.txid === txid && u.vout === vout);
                           if (utxo) {
-                            // Default to max withdraw (minus 5000 sat standard fee)
-                            const maxWithdraw = utxo.amount - 5000;
+                            // Default to max withdraw (minus dynamically calculated fee)
+                            const isMain = [...mainUtxos, ...ownMainUtxos].some(u => u.txid === utxo.txid && u.vout === utxo.vout);
+                            const targetChain = isMain ? 'main' : 'bip110';
+                            const feeSats = await calculateTxFee('withdraw', false, targetChain);
+                            const maxWithdraw = utxo.amount - feeSats;
                             setWithdrawAmountSats(String(maxWithdraw > 0 ? maxWithdraw : 0));
                           }
                         } else {
@@ -2790,14 +2819,17 @@ export default function App() {
                       />
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={async () => {
                           if (selectedWithdrawUtxoKey) {
                             const [txid, voutStr] = selectedWithdrawUtxoKey.split('|');
                             const vout = Number(voutStr);
                             const utxo = [...mainUtxos, ...bip110Utxos, ...ownMainUtxos, ...ownBip110Utxos]
                               .find(u => u.txid === txid && u.vout === vout);
                             if (utxo) {
-                              const maxWithdraw = utxo.amount - 5000;
+                              const isMain = [...mainUtxos, ...ownMainUtxos].some(u => u.txid === utxo.txid && u.vout === utxo.vout);
+                              const targetChain = isMain ? 'main' : 'bip110';
+                              const feeSats = await calculateTxFee('withdraw', false, targetChain);
+                              const maxWithdraw = utxo.amount - feeSats;
                               setWithdrawAmountSats(String(maxWithdraw > 0 ? maxWithdraw : 0));
                             }
                           }
@@ -2808,7 +2840,7 @@ export default function App() {
                       </button>
                     </div>
                     <span className="text-[10px] text-slate-500 mt-1 block">
-                      Standard transaction fee of 5,000 satoshis will be deducted.
+                      {networkMode === 'mainnet' ? 'A dynamic transaction fee will be calculated and deducted.' : 'Standard transaction fee of 5,000 satoshis will be deducted.'}
                     </span>
                   </div>
 
