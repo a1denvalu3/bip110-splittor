@@ -4,6 +4,7 @@ import axios from 'axios';
 import { ECPairFactory } from 'ecpair';
 import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
+import { ExplorerChain, ExplorerRequestError, MempoolExplorerClient } from './explorer';
 
 import { runMigrations } from './database/migrations';
 import {
@@ -74,9 +75,33 @@ const NETWORK_MODE: 'mainnet' | 'regtest' =
 
 console.log(`[BOOT] BIP110 Splittoooor Backend starting up in [${NETWORK_MODE.toUpperCase()}] mode.`);
 
-const BIP110_EXPLORER_URL = process.env.BIP110_EXPLORER_URL || 'https://mempool.bip110.space';
+const BITCOIN_EXPLORER_URL = (process.env.BITCOIN_EXPLORER_URL || 'https://mempool.space').trim();
+const BIP110_EXPLORER_URL = process.env.BIP110_EXPLORER_URL?.trim() || '';
+const mainnetExplorer = new MempoolExplorerClient(BITCOIN_EXPLORER_URL);
+const bip110Explorer = BIP110_EXPLORER_URL
+    ? new MempoolExplorerClient(BIP110_EXPLORER_URL)
+    : null;
+
 if (NETWORK_MODE === 'mainnet') {
-    console.log(`[BOOT] BIP110 Mainnet Explorer API URL configured as: [${BIP110_EXPLORER_URL}]`);
+    console.log(`[BOOT] Bitcoin Mainnet Explorer API URL configured as: [${BITCOIN_EXPLORER_URL}]`);
+    console.log(`[BOOT] BIP110 Mainnet Explorer API URL configured as: [${BIP110_EXPLORER_URL || 'MISSING'}]`);
+}
+
+function getMainnetExplorer(chain: ExplorerChain): MempoolExplorerClient {
+    if (chain === 'main') return mainnetExplorer;
+    if (!bip110Explorer) {
+        throw new Error('BIP110_EXPLORER_URL is required in mainnet mode');
+    }
+    return bip110Explorer;
+}
+
+function sendExplorerError(res: Response, error: unknown, operation: string) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[EXPLORER] ${operation}: ${message}`);
+    return res.status(502).json({
+        error: `Explorer unavailable during ${operation}`,
+        detail: message
+    });
 }
 
 // Strict state machine for valid Atomic Swap offer status transitions
@@ -258,23 +283,7 @@ async function getTxConfirmations(
 ): Promise<number> {
     if (!txid) return 0;
     if (mode === 'mainnet') {
-        if (chain === 'main') {
-            try {
-                const url = `https://mempool.space/api/tx/${txid}`;
-                const response = await axios.get(url, { timeout: 3000 });
-                return response.data.status?.confirmed ? 1 : 0;
-            } catch {
-                return 0;
-            }
-        } else {
-            try {
-                const url = `${BIP110_EXPLORER_URL}/api/tx/${txid}`;
-                const response = await axios.get(url, { timeout: 3000 });
-                return response.data.status?.confirmed ? 1 : 0;
-            } catch {
-                return 0;
-            }
-        }
+        return getMainnetExplorer(chain).getTransactionConfirmations(txid);
     }
     // Regtest
     try {
@@ -313,10 +322,10 @@ app.get('/api/offers', async (req: Request, res: Response) => {
             
             // 1. Check if the backing split UTXO is confirmed
             if (o.backingTxid) {
-                let confs = await getTxConfirmations(o.backingTxid, 'bip110', mode);
-                if (confs === 0) {
-                    confs = await getTxConfirmations(o.backingTxid, 'main', mode);
+                if (!o.backingChain) {
+                    throw new Error(`Offer ${o.id} has a backing transaction without a backing chain`);
                 }
+                const confs = await getTxConfirmations(o.backingTxid, o.backingChain, mode);
                 if (confs < 1) {
                     isPending = true;
                 }
@@ -365,6 +374,9 @@ app.get('/api/offers', async (req: Request, res: Response) => {
             totalPages: paginatedResult.totalPages
         });
     } catch (err: any) {
+        if (err instanceof ExplorerRequestError) {
+            return sendExplorerError(res, err, 'offer confirmation lookup');
+        }
         res.status(500).json({ error: "Failed to load offers from database: " + err.message });
     }
 });
@@ -544,9 +556,13 @@ app.post('/api/offers/:id/delete', async (req: Request, res: Response) => {
             return res.status(404).json({ error: "Offer not found" });
         }
 
-        // Deletion only permitted when the offer is in OPEN status
-        if (offer.status !== 'OPEN') {
-            return res.status(400).json({ error: "Cannot delete offer. Deletion is only permitted while the offer is OPEN." });
+        // The initiator may abort until their own HTLC has been funded.
+        if (offer.status !== 'OPEN' && offer.status !== 'ACCEPTED') {
+            return res.status(400).json({ error: "Cannot abort offer after the initiator has locked funds." });
+        }
+        const initiatorFunded = offer.backingChain === 'main' ? offer.btcHtlcTxid : offer.b110HtlcTxid;
+        if (initiatorFunded) {
+            return res.status(400).json({ error: "Cannot abort offer after the initiator has locked funds." });
         }
 
         // Verify cryptographic signature from the same initiator author
@@ -591,13 +607,7 @@ app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
         }
 
         if (offer.status !== 'ACCEPTED') {
-            return res.status(400).json({ error: "Only accepted offers that have not locked funds can walk back acceptance." });
-        }
-
-        // If initiator has already locked funds on their respective backing chain, cannot walk back
-        const initiatorFunded = offer.backingChain === 'main' ? offer.btcHtlcTxid : offer.b110HtlcTxid;
-        if (initiatorFunded) {
-            return res.status(400).json({ error: "Initiator has already funded the HTLC. Cannot walk back acceptance." });
+            return res.status(400).json({ error: "The acceptor can only abort before the initiator locks funds." });
         }
 
         if (!offer.acceptorPubKey) {
@@ -621,11 +631,13 @@ app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
             return res.status(401).json({ error: "Signature verification failed: " + sigErr.message });
         }
 
-        // Reset the offer status back to OPEN and clear acceptorPubKey
         await walkbackAcceptanceById(id);
-
-        console.log(`[WALKBACK] Acceptor walked back their acceptance on offer #${id}. Reset to OPEN.`);
-        res.json({ success: true, message: `Successfully walked back acceptance on offer #${id}. Status reset to OPEN.` });
+        console.log(`[ABORT] Acceptor left unfunded offer #${id}. Reset to OPEN.`);
+        return res.json({
+            success: true,
+            status: 'OPEN',
+            message: `Swap #${id} aborted before funding. The offer is OPEN again.`
+        });
     } catch (err: any) {
         res.status(500).json({ error: "Database error during walkback: " + err.message });
     }
@@ -637,37 +649,17 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
     if (!address || !chain) {
         return res.status(400).json({ error: "Missing address or chain" });
     }
+    if (chain !== 'main' && chain !== 'bip110') {
+        return res.status(400).json({ error: "Invalid chain. Must be 'main' or 'bip110'" });
+    }
     const mode = NETWORK_MODE;
 
     if (mode === 'mainnet') {
-        if (chain === 'main') {
-            // Fetch from Mempool.space Mainnet API
-            try {
-                const response = await axios.get(`https://mempool.space/api/address/${address}/utxo`, { timeout: 5000 });
-                const utxos = response.data.map((u: any) => ({
-                    txid: u.txid,
-                    vout: u.vout,
-                    amount: u.value,
-                    confirmations: u.status.confirmed ? 1 : 0
-                }));
-                return res.json({ address, chain, utxos });
-            } catch (err: any) {
-                return res.json({ address, chain, utxos: [] });
-            }
-        } else {
-            // BIP110 on Mainnet: must query server-configured BIP110 explorer
-            try {
-                const response = await axios.get(`${BIP110_EXPLORER_URL}/api/address/${address}/utxo`, { timeout: 5000 });
-                const utxos = response.data.map((u: any) => ({
-                    txid: u.txid,
-                    vout: u.vout,
-                    amount: u.value,
-                    confirmations: u.status.confirmed ? 1 : 0
-                }));
-                return res.json({ address, chain, utxos });
-            } catch (err: any) {
-                return res.json({ address, chain, utxos: [] });
-            }
+        try {
+            const utxos = await getMainnetExplorer(chain).getAddressUtxos(address);
+            return res.json({ address, chain, utxos });
+        } catch (err: any) {
+            return sendExplorerError(res, err, `${chain} UTXO lookup`);
         }
     }
 
@@ -754,34 +746,21 @@ app.post('/api/regtest/mine', async (req: Request, res: Response) => {
 
 // 8. Broadcast Signed Raw Transaction (supports Mempool.space on Main Chain, and custom user nodes on BIP110 Chain)
 app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
-    const { hex, chain, isSplit } = req.body;
+    const { hex, chain } = req.body;
     if (!hex || !chain) {
         return res.status(400).json({ error: "Missing raw transaction hex or chain parameter" });
+    }
+    if (chain !== 'main' && chain !== 'bip110') {
+        return res.status(400).json({ error: "Invalid chain. Must be 'main' or 'bip110'" });
     }
     const mode = NETWORK_MODE;
 
     if (mode === 'mainnet') {
-        if (chain === 'main') {
-            try {
-                const response = await axios.post(`https://mempool.space/api/tx`, hex, {
-                    headers: { 'Content-Type': 'text/plain' }
-                });
-                return res.json({ success: true, txid: response.data });
-            } catch (err: any) {
-                const msg = err.response && err.response.data ? err.response.data : err.message;
-                return res.status(400).json({ error: `[Mempool Broadcaster] ${msg}` });
-            }
-        } else {
-            // BIP110 chain broadcast on Mainnet: must use server-configured explorer
-            try {
-                const response = await axios.post(`${BIP110_EXPLORER_URL}/api/tx`, hex, {
-                    headers: { 'Content-Type': 'text/plain' }
-                });
-                return res.json({ success: true, txid: response.data });
-            } catch (err: any) {
-                const msg = err.response && err.response.data ? err.response.data : err.message;
-                return res.status(400).json({ error: `[Custom BIP110 Explorer Broadcaster] ${msg}` });
-            }
+        try {
+            const txid = await getMainnetExplorer(chain).broadcastTransaction(hex);
+            return res.json({ success: true, txid });
+        } catch (err: any) {
+            return sendExplorerError(res, err, `${chain} transaction broadcast`);
         }
     }
 
@@ -801,26 +780,16 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 app.get('/api/node/info', async (req: Request, res: Response) => {
     if (NETWORK_MODE === 'mainnet') {
         try {
-            // Fetch real Bitcoin Core mainnet height from Mempool.space
-            const msRes = await axios.get('https://mempool.space/api/blocks/tip/height', { timeout: 3000 });
-            const mainHeight = Number(msRes.data);
-            
-            // On mainnet, fetch from server-configured explorer
-            let bip110Height = 0;
-            try {
-                const bipRes = await axios.get(`${BIP110_EXPLORER_URL}/api/blocks/tip/height`, { timeout: 3000 });
-                bip110Height = Number(bipRes.data);
-            } catch {}
-            
+            const [mainHeight, bip110Height] = await Promise.all([
+                getMainnetExplorer('main').getTipHeight(),
+                getMainnetExplorer('bip110').getTipHeight()
+            ]);
             return res.json({
                 mainHeight,
                 bip110Height
             });
         } catch (err: any) {
-            return res.json({
-                mainHeight: 850000, // Safe default fallback if Mempool API is temporarily rate-limited
-                bip110Height: 0
-            });
+            return sendExplorerError(res, err, 'chain-tip lookup');
         }
     }
 
@@ -850,7 +819,10 @@ app.get('/api/config', (req: Request, res: Response) => {
 
 // 11. Fee Estimates Proxy Endpoint
 app.get('/api/fees/recommended', async (req: Request, res: Response) => {
-    const chain = req.query.chain === 'bip110' ? 'bip110' : 'main';
+    if (req.query.chain !== 'main' && req.query.chain !== 'bip110') {
+        return res.status(400).json({ error: "Invalid chain. Must be 'main' or 'bip110'" });
+    }
+    const chain = req.query.chain;
 
     if (NETWORK_MODE === 'regtest') {
         return res.json({
@@ -863,32 +835,35 @@ app.get('/api/fees/recommended', async (req: Request, res: Response) => {
     }
 
     try {
-        if (chain === 'main') {
-            const response = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 3000 });
-            return res.json(response.data);
-        } else {
-            const response = await axios.get(`${BIP110_EXPLORER_URL}/api/v1/fees/recommended`, { timeout: 3000 });
-            return res.json(response.data);
-        }
+        const fees = await getMainnetExplorer(chain).getRecommendedFees();
+        return res.json(fees);
     } catch (err: any) {
-        console.error(`Failed to fetch fee estimates from chain [${chain}]:`, err.message);
-        return res.status(502).json({
-            error: "Failed to fetch fee estimates from explorer",
-            fallbackFee: 15
-        });
+        return sendExplorerError(res, err, `${chain} fee estimate`);
     }
 });
 
-// Start the Express backend
-app.listen(PORT, async () => {
-    console.log(`Server listening on http://localhost:${PORT}`);
-    
-    // Run database migrations on boot
+async function startServer() {
     await runMigrations();
 
     if (NETWORK_MODE === 'regtest') {
         await initNodeWallets();
     } else {
+        if (!bip110Explorer) {
+            throw new Error('BIP110_EXPLORER_URL must be configured in mainnet mode');
+        }
+        await Promise.all([
+            mainnetExplorer.assertHealthy('Bitcoin'),
+            bip110Explorer.assertHealthy('BIP110')
+        ]);
         console.log("[BOOT] Production Mainnet mode: skipping Regtest wallet initialization.");
     }
+
+    app.listen(PORT, () => {
+        console.log(`Server listening on http://localhost:${PORT}`);
+    });
+}
+
+startServer().catch((error: any) => {
+    console.error(`[BOOT] Fatal startup error: ${error.message}`);
+    process.exit(1);
 });

@@ -117,7 +117,7 @@ npm run frontend
 ### 3. Open the Web Portal
 Once both services are running, open your web browser and navigate to:
 ```
-http://localhost:5173
+http://localhost:3000
 ```
 
 * **Step-by-Step Simulation Guide**:
@@ -126,6 +126,18 @@ http://localhost:5173
   3. **Tab 3: Marketplace Lobby**: Publish a swap offer to sell your isolated BIP110 coins in exchange for Mainnet BTC, customized with custom premiums or discounts.
   4. **Tab 4: My Swaps & Offers**: Monitor your listings, delete outstanding listings, walk back acceptances, or accept your own listing as a counterparty (by generating a new active P2TR address in Tab 1!).
   5. **Tab 5: Swap Wizard**: Orchestrate the end-to-end atomic swap using the step-by-step visual workflow to fund escrows, extract revealed preimages, settle claims, or simulate expired refund scripts.
+
+## Production Mainnet Explorer Configuration
+
+Mainnet mode fails closed unless both explorers expose a Mempool-compatible API, including chain height, transaction status, address UTXOs, raw transaction broadcast, and recommended fees.
+
+```bash
+BITCOIN_EXPLORER_URL=https://mempool.space \
+BIP110_EXPLORER_URL=https://your-bip110-mempool.example \
+npm run server:mainnet
+```
+
+The frontend uses same-origin `/api` in production. Set `VITE_API_BASE_URL` at build time only when the backend is hosted on a different origin.
 
 ---
 

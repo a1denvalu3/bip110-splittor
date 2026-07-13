@@ -4,6 +4,9 @@ import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory, ECPairAPI } from 'ecpair';
 import { PureBitcoinSwap } from './lib/PureBitcoinSwap';
+import { buildOutpointSet, classifyOutpoint, outpointKey } from '../../../src/lib/utxoClassification';
+import { selectFundingUtxos } from '../../../src/lib/fundingSelection';
+import type { FundingFeeEstimator } from '../../../src/lib/fundingSelection';
 import { 
   Wallet, 
   Coins, 
@@ -96,7 +99,10 @@ function CollapsibleCard({
   );
 }
 
-const API_BASE = 'http://localhost:4000/api';
+const API_BASE = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.DEV ? 'http://localhost:4000/api' : '/api')
+).replace(/\/$/, '');
 
 interface UTXO {
   txid: string;
@@ -176,7 +182,7 @@ export default function App() {
   const [mainUtxos, setMainUtxos] = useState<UTXO[]>([]);
   const [bip110Utxos, setBip110Utxos] = useState<UTXO[]>([]);
 
-  // Balances of own split destination address (already split)
+  // Balances of derived keypath addresses; cross-chain presence determines split state.
   const [ownMainBalance, setOwnMainBalance] = useState<number>(0);
   const [ownBip110Balance, setOwnBip110Balance] = useState<number>(0);
   const [ownMainUtxos, setOwnMainUtxos] = useState<UTXO[]>([]);
@@ -254,10 +260,20 @@ export default function App() {
     return `Block #${targetHeight} (~${blocksRemaining} blks remaining / ~${hours} hrs)`;
   };
 
-  // Helper to determine if a split contract UTXO is unsplit (valid on both chains)
+  const allMainUtxos = React.useMemo(
+    () => [...mainUtxos, ...ownMainUtxos],
+    [mainUtxos, ownMainUtxos]
+  );
+  const allBip110Utxos = React.useMemo(
+    () => [...bip110Utxos, ...ownBip110Utxos],
+    [bip110Utxos, ownBip110Utxos]
+  );
+  const mainOutpoints = React.useMemo(() => buildOutpointSet(allMainUtxos), [allMainUtxos]);
+  const bip110Outpoints = React.useMemo(() => buildOutpointSet(allBip110Utxos), [allBip110Utxos]);
+
+  // An outpoint is unsplit only while the exact txid:vout exists on both chains.
   const isUtxoUnsplit = (u: UTXO): boolean => {
-    return mainUtxos.some(mainU => mainU.txid === u.txid && mainU.vout === u.vout) &&
-           bip110Utxos.some(bipU => bipU.txid === u.txid && bipU.vout === u.vout);
+    return classifyOutpoint(u, mainOutpoints, bip110Outpoints) === 'unsplit';
   };
 
   // Helper to determine if a UTXO is split (replay-protected on one chain only)
@@ -265,38 +281,39 @@ export default function App() {
     return !isUtxoUnsplit(u);
   };
 
-  // Legacy compatibility mapping
-  const isBip110UtxoSplit = (u: UTXO): boolean => {
-    return isUtxoSplit(u);
+  const uniqueUtxos = (utxos: UTXO[]): UTXO[] => utxos.filter(
+    (utxo, index, list) => list.findIndex(candidate => outpointKey(candidate) === outpointKey(utxo)) === index
+  );
+
+  const getUnsplitUtxosForChain = (chain: 'main' | 'bip110'): UTXO[] => {
+    const candidates = chain === 'main' ? allMainUtxos : allBip110Utxos;
+    return uniqueUtxos(candidates).filter(isUtxoUnsplit);
+  };
+
+  const getSplitUtxosForChain = (chain: 'main' | 'bip110'): UTXO[] => {
+    const candidates = chain === 'main' ? allMainUtxos : allBip110Utxos;
+    return uniqueUtxos(candidates).filter(isUtxoSplit);
   };
 
   // Helper to get total Main-Chain unsplit balance
   const getMainUnsplitBalance = (): number => {
-    return mainUtxos
-      .filter(u => isUtxoUnsplit(u))
+    return getUnsplitUtxosForChain('main')
       .reduce((sum, u) => sum + u.amount, 0);
   };
 
   // Helper to get total Main-Chain split balance
   const getMainSplitBalance = (): number => {
-    const splitContractMain = mainUtxos
-      .filter(u => !isUtxoUnsplit(u))
-      .reduce((sum, u) => sum + u.amount, 0);
-    return splitContractMain + ownMainBalance;
+    return getSplitUtxosForChain('main').reduce((sum, u) => sum + u.amount, 0);
   };
 
   // Helper to get total BIP110 split balance
   const getBip110SplitBalance = (): number => {
-    const splitContractB110 = bip110Utxos
-      .filter(u => !isUtxoUnsplit(u))
-      .reduce((sum, u) => sum + u.amount, 0);
-    return splitContractB110 + ownBip110Balance;
+    return getSplitUtxosForChain('bip110').reduce((sum, u) => sum + u.amount, 0);
   };
 
   // Helper to get total BIP110 unsplit balance
   const getBip110UnsplitBalance = (): number => {
-    return bip110Utxos
-      .filter(u => isUtxoUnsplit(u))
+    return getUnsplitUtxosForChain('bip110')
       .reduce((sum, u) => sum + u.amount, 0);
   };
 
@@ -304,25 +321,11 @@ export default function App() {
   const getAvailableSplitUtxos = () => {
     const list: { txid: string; vout: number; amount: number; chain: 'main' | 'bip110'; address: string }[] = [];
     
-    // 1. Add BIP110-Chain split UTXOs on ownAddress
-    ownBip110Utxos.forEach(u => {
-      if (!list.some(item => item.txid === u.txid && item.vout === u.vout)) {
-        list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'bip110', address: ownAddress });
-      }
+    getSplitUtxosForChain('bip110').forEach(u => {
+      list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'bip110', address: u.address || ownAddress });
     });
-    
-    // 2. Add BIP110-Chain split UTXOs on splitAddress
-    bip110Utxos.filter(u => isBip110UtxoSplit(u)).forEach(u => {
-      if (!list.some(item => item.txid === u.txid && item.vout === u.vout)) {
-        list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'bip110', address: splitAddress });
-      }
-    });
-
-    // 3. Add Main-Chain split UTXOs on ownAddress
-    ownMainUtxos.forEach(u => {
-      if (!list.some(item => item.txid === u.txid && item.vout === u.vout)) {
-        list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'main', address: ownAddress });
-      }
+    getSplitUtxosForChain('main').forEach(u => {
+      list.push({ txid: u.txid, vout: u.vout, amount: u.amount, chain: 'main', address: u.address || ownAddress });
     });
 
     return list;
@@ -334,27 +337,20 @@ export default function App() {
     let targetAmount = 0;
 
     if (o.backingChain === 'bip110') {
-      availableUtxos = ownMainUtxos;
+      availableUtxos = getSplitUtxosForChain('main');
       targetAmount = o.acceptorBtcAmount;
     } else if (o.backingChain === 'main') {
-      const splitBip110Utxos = [
-        ...ownBip110Utxos,
-        ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
-      ];
-      availableUtxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
+      availableUtxos = getSplitUtxosForChain('bip110');
       targetAmount = o.initiatorB110Amount;
     } else {
       // Fallback
-      const btcTotal = ownMainUtxos.reduce((sum, u) => sum + u.amount, 0);
+      const splitMainUtxos = getSplitUtxosForChain('main');
+      const btcTotal = splitMainUtxos.reduce((sum, u) => sum + u.amount, 0);
       if (btcTotal >= o.acceptorBtcAmount) {
-        availableUtxos = ownMainUtxos;
+        availableUtxos = splitMainUtxos;
         targetAmount = o.acceptorBtcAmount;
       } else {
-        const splitBip110Utxos = [
-          ...ownBip110Utxos,
-          ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
-        ];
-        availableUtxos = splitBip110Utxos.filter((v, i, a) => a.findIndex(t => t.txid === v.txid && t.vout === v.vout) === i);
+        availableUtxos = getSplitUtxosForChain('bip110');
         targetAmount = o.initiatorB110Amount;
       }
     }
@@ -386,27 +382,15 @@ export default function App() {
     const isBtcBacking = selectedOffer.backingChain === 'main';
 
     if (step === 2) {
-      let utxo;
-      if (isBtcBacking) {
-        utxo = ownMainUtxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
-      } else {
-        utxo = bip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout)
-          || ownBip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
-      }
+      const chain = isBtcBacking ? 'main' : 'bip110';
+      const utxo = getSplitUtxosForChain(chain).find(
+        u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout
+      );
       return utxo || { txid: selectedOffer.backingTxid, vout: selectedOffer.backingVout, amount: isBtcBacking ? selectedOffer.acceptorBtcAmount : selectedOffer.initiatorB110Amount };
     }
 
     if (step === 3) {
-      if (isBtcBacking) {
-        const splitB110Utxos = [
-          ...ownBip110Utxos,
-          ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
-        ];
-        const uniqueBip110Utxos = splitB110Utxos.filter((v: any, i: any, a: any) => a.findIndex((t: any) => t.txid === v.txid && t.vout === v.vout) === i);
-        return uniqueBip110Utxos[0] || null;
-      } else {
-        return ownMainUtxos[0] || null;
-      }
+      return getSplitUtxosForChain(isBtcBacking ? 'bip110' : 'main')[0] || null;
     }
 
     return null;
@@ -648,6 +632,17 @@ export default function App() {
     return ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'), { network });
   };
 
+  const getRecommendedFeeRate = async (chain: 'main' | 'bip110'): Promise<number> => {
+    if (networkMode === 'regtest') return 15;
+
+    const res = await axios.get(`${API_BASE}/fees/recommended?chain=${chain}`, { timeout: 5000 });
+    const rate = Number(res.data.halfHourFee || res.data.hourFee);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      throw new Error(`Explorer returned an invalid fee rate for ${chain}`);
+    }
+    return rate;
+  };
+
   // Dynamically calculate transaction fee in Satoshis depending on active network mode
   const calculateTxFee = async (
     txType: 'split-script' | 'split-keypath' | 'funding' | 'claim' | 'refund' | 'withdraw',
@@ -663,53 +658,90 @@ export default function App() {
       return 2000; // split-script / split-keypath
     }
 
-    // Mainnet Mode: Fetch feerate from proper backend fee proxy with min(5, rate) safety margin
-    try {
-      const res = await axios.get(`${API_BASE}/fees/recommended?chain=${chain}`, { timeout: 3000 });
-      const mempoolRate = Number(res.data.halfHourFee || res.data.hourFee || res.data.fallbackFee || 10);
-      const safetyMargin = Math.min(5, mempoolRate);
-      const finalRate = mempoolRate + safetyMargin;
+    // Mainnet Mode: Fetch feerate from the chain-specific backend proxy.
+    const mempoolRate = await getRecommendedFeeRate(chain);
+    const safetyMargin = Math.min(5, mempoolRate);
+    const finalRate = mempoolRate + safetyMargin;
 
-      let vBytes = 150; // Default fallback size
-      switch (txType) {
-        case 'split-script':
-          vBytes = 130;
-          break;
-        case 'split-keypath':
-          vBytes = 115;
-          break;
-        case 'funding':
-          vBytes = hasChange ? 160 : 115;
-          break;
-        case 'claim':
-          vBytes = 155;
-          break;
-        case 'refund':
-          vBytes = 140;
-          break;
-        case 'withdraw':
-          vBytes = hasChange ? 180 : 130;
-          break;
-      }
-
-      // Calculate total fee in satoshis
-      const feeSats = Math.ceil(vBytes * finalRate);
-      console.log(`[FEE-CALC] Mainnet Feerate for ${chain.toUpperCase()}: ${finalRate} sats/vB (including safety margin). TxType: ${txType}, size: ${vBytes} vB. Fee: ${feeSats} sats.`);
-      return feeSats;
-    } catch (err) {
-      console.warn(`Backend fee estimates proxy endpoint failed for chain [${chain}]. Falling back to safe fee rate of 15 sats/vB:`, err);
-      let vBytes = 150;
-      switch (txType) {
-        case 'split-script': vBytes = 130; break;
-        case 'split-keypath': vBytes = 115; break;
-        case 'funding': vBytes = hasChange ? 160 : 115; break;
-        case 'claim': vBytes = 155; break;
-        case 'refund': vBytes = 140; break;
-        case 'withdraw': vBytes = hasChange ? 180 : 130; break;
-      }
-      return vBytes * 15; // 15 sats/vB fallback rate
+    let vBytes = 150;
+    switch (txType) {
+      case 'split-script':
+        vBytes = 130;
+        break;
+      case 'split-keypath':
+        vBytes = 115;
+        break;
+      case 'funding':
+        vBytes = hasChange ? 160 : 115;
+        break;
+      case 'claim':
+        vBytes = 155;
+        break;
+      case 'refund':
+        vBytes = 140;
+        break;
+      case 'withdraw':
+        vBytes = hasChange ? 180 : 130;
+        break;
     }
+
+    const feeSats = Math.ceil(vBytes * finalRate);
+    console.log(`[FEE-CALC] Mainnet Feerate for ${chain.toUpperCase()}: ${finalRate} sats/vB (including safety margin). TxType: ${txType}, size: ${vBytes} vB. Fee: ${feeSats} sats.`);
+    return feeSats;
   };
+
+  const createFundingFeeEstimator = async (chain: 'main' | 'bip110'): Promise<FundingFeeEstimator> => {
+    if (networkMode === 'regtest') {
+      return (inputCount: number) => 5000 + Math.max(0, inputCount - 1) * 1000;
+    }
+
+    const mempoolRate = await getRecommendedFeeRate(chain);
+    const finalRate = mempoolRate + Math.min(5, mempoolRate);
+    return (inputCount: number, hasChange: boolean) => {
+      const baseVbytes = hasChange ? 160 : 115;
+      const additionalInputVbytes = Math.max(0, inputCount - 1) * 68;
+      return Math.ceil((baseVbytes + additionalInputVbytes) * finalRate);
+    };
+  };
+
+  const buildFundingInputs = (
+    selectedUtxos: UTXO[],
+    chain: 'main' | 'bip110',
+    network: bitcoin.Network
+  ) => selectedUtxos.map(utxo => {
+    const utxoIndex = utxo.index !== undefined ? utxo.index : activeIndex;
+    const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, network);
+    const pubKey = Buffer.from(keyPair.publicKey);
+    const contractAddressUtxos = chain === 'main' ? mainUtxos : bip110Utxos;
+    const isContractAddress = contractAddressUtxos.some(
+      candidate => candidate.txid === utxo.txid && candidate.vout === utxo.vout
+    );
+
+    if (isContractAddress) {
+      const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, network);
+      return {
+        txid: utxo.txid,
+        vout: utxo.vout,
+        amount: BigInt(utxo.amount),
+        keyPair,
+        merkleRoot: splitPayment.leafHash,
+        paymentOutput: splitPayment.payment.output!
+      };
+    }
+
+    const keypathPayment = bitcoin.payments.p2tr({
+      internalPubkey: PureBitcoinSwap.getXOnlyPubKey(pubKey),
+      network
+    });
+    return {
+      txid: utxo.txid,
+      vout: utxo.vout,
+      amount: BigInt(utxo.amount),
+      keyPair,
+      merkleRoot: Buffer.alloc(0),
+      paymentOutput: keypathPayment.output!
+    };
+  });
 
   // Helper to derive a completely new, unused change address by incrementing maxIndex (HD privacy)
   const getNewChangeAddress = (network: bitcoin.Network): string => {
@@ -1095,6 +1127,7 @@ export default function App() {
       const res = await axios.get(`${API_BASE}/node/info`);
       setNodeInfo({ mainHeight: res.data.mainHeight, bip110Height: res.data.bip110Height });
     } catch (err: any) {
+      setNodeInfo({ mainHeight: 0, bip110Height: 0 });
       console.error(err);
     }
   };
@@ -1153,7 +1186,7 @@ export default function App() {
         const bip110WithIndex = resBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
         aggregatedBip110Utxos.push(...bip110WithIndex);
 
-        // 2. Fetch Own Keypath Address UTXOs (Already split)
+        // 2. Fetch derived keypath-address UTXOs; cross-chain presence determines classification.
         const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'main', networkMode });
         const ownMainWithIndex = resOwnMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
         aggregatedOwnMainUtxos.push(...ownMainWithIndex);
@@ -1167,6 +1200,13 @@ export default function App() {
       setBip110Utxos(aggregatedBip110Utxos);
       setOwnMainUtxos(aggregatedOwnMainUtxos);
       setOwnBip110Utxos(aggregatedOwnBip110Utxos);
+      const refreshedMainOutpoints = buildOutpointSet([...aggregatedMainUtxos, ...aggregatedOwnMainUtxos]);
+      const refreshedBip110Outpoints = buildOutpointSet([...aggregatedBip110Utxos, ...aggregatedOwnBip110Utxos]);
+      setSelectedUtxoToSplit(current => (
+        current && classifyOutpoint(current, refreshedMainOutpoints, refreshedBip110Outpoints) === 'unsplit'
+          ? current
+          : null
+      ));
 
       // Sum balances
       const totalMain = aggregatedMainUtxos.reduce((sum, u) => sum + u.amount, 0);
@@ -1183,6 +1223,17 @@ export default function App() {
 
       fetchNodeInfo();
     } catch (err: any) {
+      // Never retain a stale one-chain snapshot: classification requires a complete view of both chains.
+      setMainUtxos([]);
+      setBip110Utxos([]);
+      setOwnMainUtxos([]);
+      setOwnBip110Utxos([]);
+      setMainBalance(0);
+      setBip110Balance(0);
+      setOwnMainBalance(0);
+      setOwnBip110Balance(0);
+      setSelectedUtxoToSplit(null);
+      setSelectedBackingUtxoKey('');
       console.error("Error fetching multi-address balances:", err);
     }
   };
@@ -1223,6 +1274,11 @@ export default function App() {
     }
     if (!selectedUtxoToSplit) {
       showToast('Please select an unsplit UTXO to split!', 'error');
+      return;
+    }
+    if (!isUtxoUnsplit(selectedUtxoToSplit)) {
+      setSelectedUtxoToSplit(null);
+      showToast('This UTXO exists on only one chain and is already split.', 'error');
       return;
     }
     if (!ownAddress) {
@@ -1307,28 +1363,13 @@ export default function App() {
 
     setWithdrawing(true);
     try {
-      const [txid, voutStr] = selectedWithdrawUtxoKey.split('|');
+      const [selectedChain, txid, voutStr] = selectedWithdrawUtxoKey.split('|');
       const vout = Number(voutStr);
-
-      let utxo = mainUtxos.find(u => u.txid === txid && u.vout === vout);
-      let isSplitAddress = true;
-      let isMainChain = true;
-
-      if (!utxo) {
-        utxo = bip110Utxos.find(u => u.txid === txid && u.vout === vout);
-        isSplitAddress = true;
-        isMainChain = false;
-      }
-      if (!utxo) {
-        utxo = ownMainUtxos.find(u => u.txid === txid && u.vout === vout);
-        isSplitAddress = false;
-        isMainChain = true;
-      }
-      if (!utxo) {
-        utxo = ownBip110Utxos.find(u => u.txid === txid && u.vout === vout);
-        isSplitAddress = false;
-        isMainChain = false;
-      }
+      const isMainChain = selectedChain === 'main';
+      const chainUtxos = isMainChain ? allMainUtxos : allBip110Utxos;
+      const contractUtxos = isMainChain ? mainUtxos : bip110Utxos;
+      const utxo = chainUtxos.find(u => u.txid === txid && u.vout === vout);
+      const isSplitAddress = contractUtxos.some(u => u.txid === txid && u.vout === vout);
 
       if (!utxo) {
         throw new Error("Could not find the selected UTXO.");
@@ -1396,7 +1437,11 @@ export default function App() {
   };
 
   const handleDeleteOffer = async (o: Offer) => {
-    const confirmed = window.confirm(`Are you sure you want to delete and remove your Swap Offer #${o.id}?`);
+    const confirmed = window.confirm(
+      o.status === 'ACCEPTED'
+        ? `Abort Swap #${o.id}? Neither participant has locked funds, so the swap will be permanently removed.`
+        : `Are you sure you want to delete and remove your Swap Offer #${o.id}?`
+    );
     if (!confirmed) return;
 
     try {
@@ -1422,7 +1467,7 @@ export default function App() {
   };
 
   const handleWalkbackAcceptance = async (o: Offer) => {
-    const confirmed = window.confirm(`Are you sure you want to walk back your acceptance of Swap #${o.id}? The offer status will reset to OPEN.`);
+    const confirmed = window.confirm(`Abort Swap #${o.id}? Neither party has locked funds and the offer will reset to OPEN.`);
     if (!confirmed) return;
 
     try {
@@ -1439,8 +1484,8 @@ export default function App() {
       if (selectedOffer?.id === o.id) {
         setSelectedOffer({
           ...selectedOffer,
-          status: 'OPEN',
-          acceptorPubKey: undefined
+          status: res.data.status,
+          acceptorPubKey: res.data.status === 'OPEN' ? undefined : selectedOffer.acceptorPubKey
         });
       }
 
@@ -1496,12 +1541,26 @@ export default function App() {
       }
 
       const sellAmount = Number(sellAmountSats);
-      if (!sellAmount || sellAmount <= 0) {
-        throw new Error("Please enter a valid sell amount.");
+      if (!Number.isSafeInteger(sellAmount) || sellAmount <= 0) {
+        throw new Error("Please enter a valid whole-number sell amount in sats.");
       }
 
-      if (sellAmount > utxo.amount) {
-        throw new Error(`Sell amount cannot exceed the selected UTXO size of ${(utxo.amount / 100000000).toFixed(4)}.`);
+      const fundingCandidates = getSplitUtxosForChain(backingChain!);
+      const estimateFundingFee = await createFundingFeeEstimator(backingChain!);
+      const fundingSelection = selectFundingUtxos(
+        fundingCandidates,
+        BigInt(sellAmount),
+        estimateFundingFee,
+        utxo
+      );
+      if (!fundingSelection) {
+        const totalAvailable = fundingCandidates.reduce((sum, candidate) => sum + candidate.amount, 0);
+        const minimumFee = estimateFundingFee(Math.max(1, fundingCandidates.length), false);
+        const maximumFundable = Math.max(0, totalAvailable - minimumFee);
+        throw new Error(
+          `Insufficient ${backingChain === 'main' ? 'BTC' : 'B110'} split balance for this offer plus fees. ` +
+          `Maximum fundable amount is approximately ${maximumFundable.toLocaleString()} sats.`
+        );
       }
 
       let preimageHex = '';
@@ -1612,62 +1671,46 @@ export default function App() {
           net
         );
 
-        // 2. Fetch split UTXOs of initiator on targetChain
-        let utxo;
-        if (isBtcBacking) {
-          utxo = ownMainUtxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
-          if (!utxo) {
-            utxo = ownMainUtxos[0];
-          }
-        } else {
-          utxo = bip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout)
-            || ownBip110Utxos.find(u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout);
-          if (!utxo) {
-            const splitB110Utxos = bip110Utxos.filter(u => isBip110UtxoSplit(u));
-            utxo = splitB110Utxos[0] || ownBip110Utxos[0];
-          }
+        // 2. Select enough of the initiator's split UTXOs to cover the contract and fee.
+        // The outpoint chosen when publishing remains the preferred/identifying input,
+        // but it is not required to fund the whole contract by itself.
+        const fundingCandidates = getSplitUtxosForChain(targetChain);
+        const preferredUtxo = fundingCandidates.find(
+          u => u.txid === selectedOffer.backingTxid && u.vout === selectedOffer.backingVout
+        );
+
+        if (!preferredUtxo) {
+          throw new Error(`The split UTXO backing this offer is no longer available on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}.`);
         }
 
-        if (!utxo) throw new Error(`No split UTXO found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! Split your coins first.`);
+        const targetSats = BigInt(targetAmount);
+        const estimateFundingFee = await createFundingFeeEstimator(targetChain);
+        const fundingSelection = selectFundingUtxos(
+          fundingCandidates,
+          targetSats,
+          estimateFundingFee,
+          preferredUtxo
+        );
 
-        // 3. Build & sign funding transaction locally!
-        const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
-        const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
-        const pubKey = Buffer.from(keyPair.publicKey);
-
-        let splitDestPayment: bitcoin.payments.Payment;
-        let merkleRoot: Buffer = Buffer.alloc(0);
-        
-        const isParentSplitAddress = !isBtcBacking && !ownBip110Utxos.some(u => u.txid === utxo!.txid && u.vout === utxo!.vout);
-        if (isParentSplitAddress) {
-          const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
-          splitDestPayment = splitPayment.payment;
-          merkleRoot = splitPayment.leafHash;
-        } else {
-          splitDestPayment = bitcoin.payments.p2tr({
-            internalPubkey: PureBitcoinSwap.getXOnlyPubKey(pubKey),
-            network: net
-          });
+        if (!fundingSelection) {
+          const totalAvailable = fundingCandidates.reduce((sum, candidate) => sum + candidate.amount, 0);
+          throw new Error(
+            `Insufficient split balance on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'} to cover the ` +
+            `${(Number(targetSats) / 100000000).toFixed(8)} contract plus fees. ` +
+            `Available across ${fundingCandidates.length} UTXO${fundingCandidates.length === 1 ? '' : 's'}: ${(totalAvailable / 100000000).toFixed(8)}.`
+          );
         }
 
-        const hasChange = BigInt(utxo.amount) > BigInt(targetAmount) + 5000n;
-        const feeSats = await calculateTxFee('funding', hasChange, targetChain);
-        if (BigInt(utxo.amount) < BigInt(targetAmount) + BigInt(feeSats)) {
-          throw new Error(`Insufficient funds in selected UTXO to cover funding amount of ${(Number(targetAmount) / 100000000).toFixed(4)} plus the transaction fee of ${(Number(feeSats) / 100000000).toFixed(8)}! Select or deposit a larger UTXO.`);
-        }
-        const changeAddress = hasChange ? getNewChangeAddress(net) : undefined;
+        const changeAddress = fundingSelection.hasChange ? getNewChangeAddress(net) : undefined;
+        const inputsData = buildFundingInputs(fundingSelection.utxos, targetChain, net);
 
-        const tx = PureBitcoinSwap.buildHtlcFundingTx(
-          keyPair,
-          utxo.txid,
-          utxo.vout,
-          BigInt(utxo.amount),
-          BigInt(targetAmount),
+        // 3. Build & sign the multi-input funding transaction locally.
+        const tx = PureBitcoinSwap.buildMultiInputHtlcFundingTx(
+          inputsData,
+          targetSats,
           htlc.address!,
-          splitDestPayment,
-          merkleRoot,
           changeAddress,
-          BigInt(feeSats),
+          fundingSelection.feeSats,
           net
         );
 
@@ -1738,116 +1781,32 @@ export default function App() {
           net
         );
 
-        // 2. Fetch split outputs of acceptor on targetChain
-        let candidates: UTXO[] = [];
-        if (targetChain === 'main') {
-          const splitDestRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-            address: ownAddress,
-            chain: 'main',
-            networkMode
-          });
-          candidates = splitDestRes.data.utxos;
-        } else {
-          const splitB110Utxos = [
-            ...ownBip110Utxos,
-            ...bip110Utxos.filter(u => isBip110UtxoSplit(u))
-          ];
-          candidates = splitB110Utxos.filter((v: any, i: any, a: any) => a.findIndex((t: any) => t.txid === v.txid && t.vout === v.vout) === i);
-        }
-
-        // Sort candidates descending by amount to minimize the number of inputs used
-        const sortedCandidates = [...candidates].sort((a, b) => b.amount - a.amount);
-
-        // Select enough UTXOs to cover targetAmount + dynamically calculated fee
-        let selectedUtxos: UTXO[] = [];
-        let totalInputSats = 0n;
+        // 2. Select enough split outputs of the acceptor to fund the contract and fee.
+        const candidates = getSplitUtxosForChain(targetChain);
         const targetSats = BigInt(targetAmount);
+        const estimateFundingFee = await createFundingFeeEstimator(targetChain);
+        const fundingSelection = selectFundingUtxos(candidates, targetSats, estimateFundingFee);
 
-        // Estimate current fee rate for mainnet
-        let rate = 15;
-        if (networkMode === 'mainnet') {
-          try {
-            const feeRes = await axios.get('https://mempool.space/api/v1/fees/recommended', { timeout: 1500 });
-            rate = Number(feeRes.data.halfHourFee || feeRes.data.hourFee || 15);
-          } catch (e) {}
+        if (!fundingSelection) {
+          const totalAvailable = candidates.reduce((sum, candidate) => sum + candidate.amount, 0);
+          throw new Error(
+            `Insufficient split balance on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'} to cover the ` +
+            `${(Number(targetSats) / 100000000).toFixed(8)} contract plus fees. ` +
+            `Available across ${candidates.length} UTXO${candidates.length === 1 ? '' : 's'}: ${(totalAvailable / 100000000).toFixed(8)}.`
+          );
         }
 
-        for (const u of sortedCandidates) {
-          selectedUtxos.push(u);
-          totalInputSats += BigInt(u.amount);
-          
-          // Dynamically check if we have enough to cover target amount + fee for the current selection
-          const hasChange = totalInputSats > targetSats + 5000n;
-          let feeSats = BigInt(await calculateTxFee('funding', hasChange));
-          
-          // Dynamic fee adjustment for multiple inputs (68 vbytes per extra input)
-          if (selectedUtxos.length > 1) {
-            if (networkMode === 'regtest') {
-              feeSats += BigInt(1000 * (selectedUtxos.length - 1));
-            } else {
-              feeSats += BigInt(68 * (selectedUtxos.length - 1) * rate);
-            }
-          }
-
-          if (totalInputSats >= targetSats + feeSats) {
-            break;
-          }
-        }
-
-        // Recalculate final fee for the selected UTXOs
-        const finalHasChange = totalInputSats > targetSats + 5000n;
-        let feeSats = BigInt(await calculateTxFee('funding', finalHasChange));
-        if (selectedUtxos.length > 1) {
-          if (networkMode === 'regtest') {
-            feeSats += BigInt(1000 * (selectedUtxos.length - 1));
-          } else {
-            feeSats += BigInt(68 * (selectedUtxos.length - 1) * rate);
-          }
-        }
-
-        if (selectedUtxos.length === 0 || totalInputSats < targetSats + feeSats) {
-          throw new Error(`Insufficient split UTXOs found on ${targetChain === 'main' ? 'Bitcoin' : 'BIP110-Chain'}! You need a total balance of at least ${(Number(targetSats + feeSats) / 100000000).toFixed(8)} to accept and fund this contract.`);
-        }
-
-        const changeAddress = finalHasChange ? getNewChangeAddress(net) : undefined;
+        const changeAddress = fundingSelection.hasChange ? getNewChangeAddress(net) : undefined;
 
         // 3. Build & sign funding transaction locally with multiple inputs!
-        const inputsData = selectedUtxos.map(utxo => {
-          const utxoIndex = (utxo as any).index !== undefined ? (utxo as any).index : activeIndex;
-          const keyPair = deriveKeyPairForIndex(masterPrivateKey, utxoIndex, net);
-          const splitDestPubKey = Buffer.from(keyPair.publicKey);
-
-          let splitDestPayment: bitcoin.payments.Payment;
-          let merkleRoot: Buffer = Buffer.alloc(0);
-
-          const isParentSplitAddress = (targetChain === 'bip110') && !ownBip110Utxos.some(u => u.txid === utxo.txid && u.vout === utxo.vout);
-          if (isParentSplitAddress) {
-            const splitPayment = PureBitcoinSwap.createSplitPayment(splitDestPubKey, net);
-            splitDestPayment = splitPayment.payment;
-            merkleRoot = splitPayment.leafHash;
-          } else {
-            splitDestPayment = bitcoin.payments.p2tr({
-              internalPubkey: PureBitcoinSwap.getXOnlyPubKey(splitDestPubKey),
-              network: net
-            });
-          }
-
-          return {
-            txid: utxo.txid,
-            vout: utxo.vout,
-            amount: BigInt(utxo.amount),
-            keyPair,
-            merkleRoot,
-            paymentOutput: splitDestPayment.output!
-          };
-        });
+        const inputsData = buildFundingInputs(fundingSelection.utxos, targetChain, net);
 
         const tx = PureBitcoinSwap.buildMultiInputHtlcFundingTx(
           inputsData,
           targetSats,
           htlc.address!,
           changeAddress,
-          feeSats,
+          fundingSelection.feeSats,
           net
         );
 
@@ -2609,7 +2568,7 @@ export default function App() {
                     ) : (
                       <div className="space-y-2">
                         {/* Render Main-Chain UTXOs with dynamic split check */}
-                        {mainUtxos.map((u, i) => {
+                        {uniqueUtxos(allMainUtxos).map((u, i) => {
                           const isSplit = isUtxoSplit(u);
                           return (
                             <div key={`main-${i}`} className={`p-2.5 rounded-xl text-xs flex justify-between items-center ${
@@ -2641,22 +2600,6 @@ export default function App() {
                             </div>
                           );
                         })}
-                        {/* Render Already Split UTXOs */}
-                        {ownMainUtxos.map((u, i) => (
-                          <div key={`split-${i}`} className="bg-slate-900/40 border border-emerald-950 p-2.5 rounded-xl text-xs flex justify-between items-center shadow-sm shadow-emerald-500/5">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
-                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
-                                u.confirmations < 1 
-                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
-                                  : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-400 animate-pulse'
-                              }`}>
-                                {u.confirmations < 1 ? '🛡️ PENDING' : '🛡️ Split'}
-                              </span>
-                            </div>
-                            <span className="font-semibold text-emerald-400">{(u.amount / 100000000).toFixed(4)} BTC</span>
-                          </div>
-                        ))}
                       </div>
                     )}
                   </div>
@@ -2670,8 +2613,8 @@ export default function App() {
                     ) : (
                       <div className="space-y-2">
                         {/* Render BIP110 UTXOs with dynamic split check */}
-                        {bip110Utxos.map((u, i) => {
-                          const isSplit = isBip110UtxoSplit(u);
+                        {uniqueUtxos(allBip110Utxos).map((u, i) => {
+                          const isSplit = isUtxoSplit(u);
                           return (
                             <div key={`b110-${i}`} className={`p-2.5 rounded-xl text-xs flex justify-between items-center ${
                               isSplit 
@@ -2703,22 +2646,6 @@ export default function App() {
                           )
                         })}
 
-                        {/* Render Already Split BIP110 UTXOs on ownAddress */}
-                        {ownBip110Utxos.map((u, i) => (
-                          <div key={`split-b110-${i}`} className="bg-slate-900/40 border border-sky-950 p-2.5 rounded-xl text-xs flex justify-between items-center shadow-sm shadow-sky-500/5">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-slate-400 truncate w-24">{u.txid}</span>
-                              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
-                                u.confirmations < 1 
-                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-400 animate-pulse'
-                                  : 'bg-sky-950/30 border-sky-800/40 text-sky-400'
-                              }`}>
-                                {u.confirmations < 1 ? '🛡️ PENDING' : '🛡️ Split'}
-                              </span>
-                            </div>
-                            <span className="font-semibold text-sky-400">{(u.amount / 100000000).toFixed(4)} B110</span>
-                          </div>
-                        ))}
                       </div>
                     )}
                   </div>
@@ -2744,14 +2671,14 @@ export default function App() {
                         const key = e.target.value;
                         setSelectedWithdrawUtxoKey(key);
                         if (key) {
-                          const [txid, voutStr] = key.split('|');
+                          const [chain, txid, voutStr] = key.split('|');
                           const vout = Number(voutStr);
-                          const utxo = [...mainUtxos, ...bip110Utxos, ...ownMainUtxos, ...ownBip110Utxos]
+                          const chainUtxos = chain === 'main' ? allMainUtxos : allBip110Utxos;
+                          const utxo = chainUtxos
                             .find(u => u.txid === txid && u.vout === vout);
                           if (utxo) {
                             // Default to max withdraw (minus dynamically calculated fee)
-                            const isMain = [...mainUtxos, ...ownMainUtxos].some(u => u.txid === utxo.txid && u.vout === utxo.vout);
-                            const targetChain = isMain ? 'main' : 'bip110';
+                            const targetChain = chain === 'main' ? 'main' : 'bip110';
                             const feeSats = await calculateTxFee('withdraw', false, targetChain);
                             const maxWithdraw = utxo.amount - feeSats;
                             setWithdrawAmountSats(String(maxWithdraw > 0 ? maxWithdraw : 0));
@@ -2765,25 +2692,25 @@ export default function App() {
                       <option value="">-- Choose a Source UTXO --</option>
                       {/* Main-chain splitAddress outputs */}
                       {mainUtxos.map(u => (
-                        <option key={`${u.txid}-${u.vout}-split-main`} value={`${u.txid}|${u.vout}`}>
+                        <option key={`${u.txid}-${u.vout}-split-main`} value={`main|${u.txid}|${u.vout}`}>
                           BTC [Contract Addr] ({(u.amount / 100000000).toFixed(4)} BTC | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
                         </option>
                       ))}
                       {/* BIP110-chain splitAddress outputs */}
                       {bip110Utxos.map(u => (
-                        <option key={`${u.txid}-${u.vout}-split-b110`} value={`${u.txid}|${u.vout}`}>
+                        <option key={`${u.txid}-${u.vout}-split-b110`} value={`bip110|${u.txid}|${u.vout}`}>
                           B110 [Contract Addr] ({(u.amount / 100000000).toFixed(4)} B110 | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
                         </option>
                       ))}
                       {/* Main-chain ownAddress outputs */}
                       {ownMainUtxos.map(u => (
-                        <option key={`${u.txid}-${u.vout}-own-main`} value={`${u.txid}|${u.vout}`}>
+                        <option key={`${u.txid}-${u.vout}-own-main`} value={`main|${u.txid}|${u.vout}`}>
                           BTC [Own Split Addr] ({(u.amount / 100000000).toFixed(4)} BTC | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
                         </option>
                       ))}
                       {/* BIP110-chain ownAddress outputs */}
                       {ownBip110Utxos.map(u => (
-                        <option key={`${u.txid}-${u.vout}-own-b110`} value={`${u.txid}|${u.vout}`}>
+                        <option key={`${u.txid}-${u.vout}-own-b110`} value={`bip110|${u.txid}|${u.vout}`}>
                           B110 [Own Split Addr] ({(u.amount / 100000000).toFixed(4)} B110 | {u.txid.substring(0, 10)}...:{u.vout}) [Addr Index #{u.index !== undefined ? u.index + 1 : 1}]
                         </option>
                       ))}
@@ -2822,13 +2749,13 @@ export default function App() {
                         type="button"
                         onClick={async () => {
                           if (selectedWithdrawUtxoKey) {
-                            const [txid, voutStr] = selectedWithdrawUtxoKey.split('|');
+                            const [chain, txid, voutStr] = selectedWithdrawUtxoKey.split('|');
                             const vout = Number(voutStr);
-                            const utxo = [...mainUtxos, ...bip110Utxos, ...ownMainUtxos, ...ownBip110Utxos]
+                            const chainUtxos = chain === 'main' ? allMainUtxos : allBip110Utxos;
+                            const utxo = chainUtxos
                               .find(u => u.txid === txid && u.vout === vout);
                             if (utxo) {
-                              const isMain = [...mainUtxos, ...ownMainUtxos].some(u => u.txid === utxo.txid && u.vout === utxo.vout);
-                              const targetChain = isMain ? 'main' : 'bip110';
+                              const targetChain = chain === 'main' ? 'main' : 'bip110';
                               const feeSats = await calculateTxFee('withdraw', false, targetChain);
                               const maxWithdraw = utxo.amount - feeSats;
                               setWithdrawAmountSats(String(maxWithdraw > 0 ? maxWithdraw : 0));
@@ -2893,14 +2820,14 @@ export default function App() {
                     Available Contract UTXOs (Select the UTXO to split)
                   </h4>
                   
-                  {/* We only allow selecting UNSPLIT UTXOs. A UTXO is unsplit if it is present on the Main-Chain */}
-                  {mainUtxos.length === 0 ? (
+                  {/* Only outpoints currently present on both chains are eligible for splitting. */}
+                  {getUnsplitUtxosForChain('main').length === 0 ? (
                     <div className="text-center py-8 border border-dashed border-slate-800 bg-slate-950/40 rounded-xl text-xs text-slate-500">
-                      No unsplit contract outputs available on Main-Chain. Deposit some funds via the faucet tab first!
+                      No unsplit outputs detected. An output must exist on both chains to be eligible.
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 gap-3">
-                      {mainUtxos.map((u, idx) => {
+                      {getUnsplitUtxosForChain('main').map((u, idx) => {
                         const isSelected = selectedUtxoToSplit?.txid === u.txid && selectedUtxoToSplit?.vout === u.vout;
                         return (
                           <div 
@@ -2939,7 +2866,7 @@ export default function App() {
                 >
                   <div className="space-y-2">
                     {/* Render split UTXOs on Main-Chain */}
-                    {ownMainUtxos.map((u, i) => (
+                    {getSplitUtxosForChain('main').map((u, i) => (
                       <div key={`split-main-tab-${i}`} className="bg-slate-900/30 border border-emerald-950/50 p-3.5 rounded-xl text-xs flex justify-between items-center opacity-80">
                         <div className="flex items-center gap-3">
                           <div className="flex flex-col">
@@ -2961,7 +2888,7 @@ export default function App() {
                     ))}
                     
                     {/* Render split UTXOs on BIP110-Chain */}
-                    {bip110Utxos.filter(u => isBip110UtxoSplit(u)).map((u, i) => (
+                    {getSplitUtxosForChain('bip110').map((u, i) => (
                       <div key={`split-b110-tab-${i}`} className="bg-slate-900/30 border border-sky-950/50 p-3.5 rounded-xl text-xs flex justify-between items-center opacity-80">
                         <div className="flex items-center gap-3">
                           <div className="flex flex-col">
@@ -2982,29 +2909,7 @@ export default function App() {
                       </div>
                     ))}
 
-                    {/* Render split UTXOs on BIP110-Chain (ownAddress) */}
-                    {ownBip110Utxos.map((u, i) => (
-                      <div key={`split-b110-own-tab-${i}`} className="bg-slate-900/30 border border-sky-950/50 p-3.5 rounded-xl text-xs flex justify-between items-center opacity-80">
-                        <div className="flex items-center gap-3">
-                          <div className="flex flex-col">
-                            <span className="font-mono text-slate-300 text-xs truncate w-32 sm:w-64">{u.txid}:{u.vout}</span>
-                            <span className="text-[10px] text-slate-500">
-                              Confirmations: {u.confirmations} {u.confirmations < 1 && <span className="text-amber-500 font-bold ml-1.5 animate-pulse">(PENDING)</span>}
-                            </span>
-                          </div>
-                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded self-start ${
-                            u.confirmations < 1
-                              ? 'bg-amber-950/30 border border-amber-900/40 text-amber-400 animate-pulse'
-                              : 'bg-sky-950/30 border border-sky-900/40 text-sky-400'
-                          }`}>
-                            {u.confirmations < 1 ? '🛡️ Split (PENDING)' : '🛡️ Split (BIP110)'}
-                          </span>
-                        </div>
-                        <span className="font-semibold text-slate-300">{(u.amount / 100000000).toFixed(4)} B110</span>
-                      </div>
-                    ))}
-
-                    {ownMainUtxos.length === 0 && ownBip110Utxos.length === 0 && bip110Utxos.filter(u => isBip110UtxoSplit(u)).length === 0 && (
+                    {getSplitUtxosForChain('main').length === 0 && getSplitUtxosForChain('bip110').length === 0 && (
                       <div className="text-center py-6 border border-slate-900 bg-slate-950/20 rounded-xl text-xs text-slate-600">
                         No split UTXOs detected yet. Select an unsplit UTXO above to split!
                       </div>
@@ -3097,11 +3002,10 @@ export default function App() {
                       if (key) {
                         const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === key);
                         if (utxo) {
-                          const finalAmount = String(utxo.amount);
-                          setSellAmountSats(finalAmount);
+                          setSellAmountSats('');
                           setPremiumPercent('0'); // Default to 0% (parity)
-                          setNewOfferB110(finalAmount);
-                          setNewOfferBtc(finalAmount);
+                          setNewOfferB110('');
+                          setNewOfferBtc('');
                         }
                       } else {
                         setSellAmountSats('');
@@ -3129,6 +3033,8 @@ export default function App() {
                     const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
                     if (!utxo) return null;
                     const chainLabel = utxo.chain === 'main' ? 'BTC' : 'B110';
+                    const fundingCandidates = getSplitUtxosForChain(utxo.chain);
+                    const aggregateBalance = fundingCandidates.reduce((sum, candidate) => sum + candidate.amount, 0);
                     return (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
                         <div>
@@ -3138,14 +3044,16 @@ export default function App() {
                           <input
                             type="number"
                             min="100000"
-                            max={utxo.amount}
                             value={sellAmountSats}
                             onChange={(e) => handleSellAmountChange(e.target.value)}
-                            placeholder={`Max ${(utxo.amount).toLocaleString()} Sats`}
+                            placeholder={`Up to aggregate balance minus fees`}
                             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                           />
                           <span className="text-[10px] text-slate-500 mt-1 block">
-                            Available in UTXO: <span className="font-semibold text-slate-400">{(utxo.amount).toLocaleString()} Sats</span> ({(utxo.amount / 100000000).toFixed(4)} {chainLabel})
+                            Aggregate split balance: <span className="font-semibold text-slate-400">{aggregateBalance.toLocaleString()} Sats</span> ({(aggregateBalance / 100000000).toFixed(4)} {chainLabel}) across {fundingCandidates.length} UTXO{fundingCandidates.length === 1 ? '' : 's'}. Fees must also fit within this balance.
+                          </span>
+                          <span className="text-[10px] text-slate-600 mt-1 block">
+                            The selected outpoint anchors the offer; additional split UTXOs are added automatically when funding it.
                           </span>
                         </div>
 
@@ -3499,13 +3407,13 @@ export default function App() {
                           Open Swap Wizard
                         </button>
                         
-                        {o.status === 'OPEN' && (
+                        {(o.status === 'OPEN' || o.status === 'ACCEPTED') && (
                           <button
                             onClick={() => handleDeleteOffer(o)}
                             className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/40 text-rose-300 transition-all flex items-center justify-center gap-1"
-                            title="Cancel and permanently delete this offer"
+                            title={o.status === 'ACCEPTED' ? 'Abort before locking your funds' : 'Cancel and permanently delete this offer'}
                           >
-                            Delete
+                            {o.status === 'ACCEPTED' ? 'Abort Swap' : 'Delete'}
                           </button>
                         )}
                       </div>
@@ -3522,7 +3430,7 @@ export default function App() {
               defaultOpen={true}
             >
               <p className="text-xs text-slate-400 mb-6">
-                Monitor swaps you accepted. You can walk back acceptance if the initiator hasn't funded the HTLC yet.
+                Monitor swaps you accepted. You may abort at any point before you lock your own funds.
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -3596,13 +3504,13 @@ export default function App() {
                           Open Swap Wizard
                         </button>
                         
-                        {o.status === 'ACCEPTED' && !(o.backingChain === 'main' ? o.btcHtlcTxid : o.b110HtlcTxid) && (
+                        {o.status === 'ACCEPTED' && (
                           <button
                             onClick={() => handleWalkbackAcceptance(o)}
                             className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-amber-950/40 hover:bg-amber-900/60 border border-amber-900/40 text-amber-400 transition-all flex items-center justify-center gap-1"
-                            title="Walk back acceptance and reset offer to open"
+                            title="Abort before locking your funds"
                           >
-                            Walk Back
+                            Abort Swap
                           </button>
                         )}
                       </div>
@@ -3711,6 +3619,33 @@ export default function App() {
                   );
                 })()}
 
+                {/* Either participant may abort only while neither party has locked funds. */}
+                {(() => {
+                  const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+                  const isAcceptor = selectedOffer.acceptorPubKey === publicKey;
+                  const canInitiatorAbort = isInitiator && (selectedOffer.status === 'OPEN' || selectedOffer.status === 'ACCEPTED');
+                  const canAcceptorAbort = isAcceptor && selectedOffer.status === 'ACCEPTED';
+                  if (!canInitiatorAbort && !canAcceptorAbort) return null;
+
+                  return (
+                    <div className="bg-rose-950/15 border border-rose-900/40 p-4 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                      <div>
+                        <h4 className="text-xs font-bold text-rose-300">Abort Before Locking Funds</h4>
+                        <p className="text-[10px] text-slate-400 mt-1 leading-normal">
+                          Your funds are still unlocked. Aborting now does not require an on-chain refund.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => canInitiatorAbort ? handleDeleteOffer(selectedOffer) : handleWalkbackAcceptance(selectedOffer)}
+                        className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-rose-950/50 hover:bg-rose-900/60 border border-rose-900/50 text-rose-300 transition-all whitespace-nowrap"
+                      >
+                        Abort Swap
+                      </button>
+                    </div>
+                  );
+                })()}
+
                 {/* State Machine Step Tracker */}
                 <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                   {(() => {
@@ -3792,8 +3727,8 @@ export default function App() {
                         </p>
                       </div>
                       <div className="flex gap-2">
-                        <span className={`text-xs font-semibold px-2 py-1 rounded border ${ownMainBalance > 0 ? 'bg-emerald-950/40 border-emerald-900/60 text-emerald-400' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
-                          {ownMainBalance > 0 ? 'BTC Split Ready' : 'BTC Split Pending'}
+                        <span className={`text-xs font-semibold px-2 py-1 rounded border ${getMainSplitBalance() > 0 ? 'bg-emerald-950/40 border-emerald-900/60 text-emerald-400' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
+                          {getMainSplitBalance() > 0 ? 'BTC Split Ready' : 'BTC Split Pending'}
                         </span>
                         <span className={`text-xs font-semibold px-2 py-1 rounded border ${getBip110SplitBalance() > 0 ? 'bg-sky-950/40 border-sky-900/60 text-sky-400' : 'bg-slate-900 border-slate-800 text-slate-500'}`}>
                           {getBip110SplitBalance() > 0 ? 'B110 Split Ready' : 'B110 Split Pending'}
@@ -3817,10 +3752,11 @@ export default function App() {
                               <h4 className="text-xs font-bold text-slate-200">Lock {isBtcBacking ? 'Bitcoin' : 'BIP110'} Coins into HTLC Contract</h4>
                               {utxo && (
                                 <p className="text-[10px] text-slate-400 font-mono mt-2 bg-slate-900 border border-slate-850 p-2.5 rounded-lg leading-normal">
-                                  <span className="block font-semibold text-slate-300 mb-1">Spending Split UTXO:</span>
+                                  <span className="block font-semibold text-slate-300 mb-1">Preferred Backing Input:</span>
                                   TxID: {utxo.txid.substring(0, 12)}...{utxo.txid.substring(52)}:{utxo.vout}<br />
                                   Amount: {(utxo.amount / 100000000).toFixed(4)} {isBtcBacking ? 'BTC' : 'B110'}<br />
-                                  Address: {utxo.address || 'Split contract / ownAddress'}
+                                  Address: {utxo.address || 'Split contract / ownAddress'}<br />
+                                  <span className="text-slate-500">Additional split UTXOs are selected automatically when required.</span>
                                 </p>
                               )}
                               {isUtxoUnconfirmed && (
