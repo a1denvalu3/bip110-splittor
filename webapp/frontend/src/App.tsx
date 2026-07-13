@@ -67,13 +67,13 @@ function CollapsibleCard({
   const [isOpen, setIsOpen] = useState(defaultOpen);
 
   return (
-    <div className={`bg-slate-900/50 border border-slate-800/80 rounded-2xl shadow-xl backdrop-blur-sm overflow-hidden ${className}`}>
+    <section className={`protocol-card bg-slate-900/50 border border-slate-800/80 rounded-2xl shadow-xl backdrop-blur-sm overflow-hidden ${className}`}>
       <div
-        className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-900/10 transition-colors cursor-pointer select-none"
+        className="protocol-card__header w-full px-6 py-4 flex items-center justify-between hover:bg-slate-900/10 transition-colors cursor-pointer select-none"
         onClick={() => setIsOpen(!isOpen)}
       >
         <div className="flex items-center gap-2">
-          {Icon && <Icon className="w-5 h-5 text-indigo-400" />}
+          {Icon && <span className="protocol-card__icon"><Icon className="w-5 h-5 text-indigo-400" /></span>}
           <h3 className="text-md font-semibold text-slate-200">{title}</h3>
         </div>
         <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
@@ -88,11 +88,11 @@ function CollapsibleCard({
         </div>
       </div>
       {isOpen && (
-        <div className="px-6 pb-6 pt-2 border-t border-slate-800/40">
+        <div className="protocol-card__body px-6 pb-6 pt-2 border-t border-slate-800/40">
           {children}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -2061,7 +2061,7 @@ export default function App() {
   const isLockoutActive = nodeInfo.mainHeight > 0 && nodeInfo.bip110Height > 0 && blockLead > 0 && blockLead < 10;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+    <div className="app-shell min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-5 right-5 z-50 px-4 py-3 rounded-lg shadow-2xl flex items-center gap-3 border transition-all duration-300 ${
@@ -2077,19 +2077,20 @@ export default function App() {
       )}
 
       {/* Sticky Top Navigation Bar */}
-      <div className="sticky top-0 z-40 w-full bg-slate-950/80 backdrop-blur-md border-b border-slate-900">
+      <div className="command-deck sticky top-0 z-40 w-full bg-slate-950/80 backdrop-blur-md border-b border-slate-900">
         {/* Header */}
-        <header className="border-b border-slate-800/85 bg-slate-900/40 py-3 md:py-0 md:h-16 flex items-center">
+        <header className="command-header border-b border-slate-800/85 bg-slate-900/40 py-3 md:py-0 md:h-16 flex items-center">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 w-full flex flex-col md:flex-row md:items-center justify-between gap-3 md:gap-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-gradient-to-tr from-sky-500 to-indigo-500 p-2 rounded-xl shadow-lg shadow-sky-500/10">
-              <Layers className="w-6 h-6 text-white" />
+          <div className="brand-lockup flex items-center gap-3">
+            <div className="brand-mark bg-gradient-to-tr from-sky-500 to-indigo-500 p-2 rounded-xl shadow-lg shadow-sky-500/10">
+              <Layers className="w-6 h-6 text-white" strokeWidth={1.6} />
             </div>
             <div>
-              <h1 className="font-bold text-base sm:text-lg leading-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
-                BIP110 Split & Swap Portal
+              <div className="brand-kicker">REPLAY-PROTECTED DESK</div>
+              <h1 className="brand-title font-bold text-base sm:text-lg leading-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
+                Splittoooor
               </h1>
-              <p className="text-[10px] sm:text-xs text-slate-400">Atomic Swaps Across Consensus Hard Forks</p>
+              <p className="brand-subtitle text-[10px] sm:text-xs text-slate-400">Atomic settlement across a consensus fork</p>
             </div>
           </div>
 
@@ -2192,7 +2193,7 @@ export default function App() {
       </header>
 
       {/* Navigation tabs */}
-      <div className="bg-slate-950/60 overflow-x-auto scrollbar-none whitespace-nowrap">
+      <nav className="workflow-nav bg-slate-950/60 overflow-x-auto scrollbar-none whitespace-nowrap" aria-label="Swap workflow">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1 min-w-max sm:min-w-0">
           {[
             { id: 'wallet', label: '1. Unified Wallet', icon: Wallet },
@@ -2206,9 +2207,9 @@ export default function App() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`py-4 px-6 font-medium text-sm flex items-center gap-2 border-b-2 transition-all shrink-0 ${
+                className={`workflow-tab py-4 px-6 font-medium text-sm flex items-center gap-2 border-b-2 transition-all shrink-0 ${
                   activeTab === tab.id 
-                    ? 'border-indigo-500 text-indigo-400' 
+                    ? 'workflow-tab--active border-indigo-500 text-indigo-400'
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -2218,11 +2219,11 @@ export default function App() {
             )
           })}
         </div>
-      </div>
+      </nav>
     </div>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-8 w-full">
+      <main className="workspace flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-8 w-full">
         {isLockoutActive ? (
           <div className="bg-slate-900/50 border border-amber-900/40 rounded-3xl p-8 md:p-12 shadow-2xl flex flex-col items-center text-center space-y-6 max-w-3xl mx-auto backdrop-blur-sm mt-8 animate-fade-in">
             <div className="w-16 h-16 rounded-2xl bg-amber-950/40 border border-amber-500/50 flex items-center justify-center shadow-lg shadow-amber-500/10">
