@@ -43,7 +43,7 @@ export class MempoolExplorerClient {
     private readonly timeoutMs: number;
 
     constructor(baseUrl: string, http: HttpClient = axios, timeoutMs = 5000) {
-        const normalizedUrl = baseUrl.trim().replace(/\/+$/, '');
+        const normalizedUrl = baseUrl.trim().replace(/\/+$/, '').replace(/\/api$/, '');
         if (!normalizedUrl) throw new Error('Explorer base URL is required');
 
         let parsed: URL;
@@ -132,7 +132,7 @@ export class MempoolExplorerClient {
                 timeout: this.timeoutMs
             });
             const height = Number(response.data);
-            if (!Number.isSafeInteger(height) || height <= 0) {
+            if (!Number.isSafeInteger(height) || height < 0) {
                 throw new Error('Explorer returned an invalid chain height');
             }
             return height;

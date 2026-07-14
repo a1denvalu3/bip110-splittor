@@ -10,7 +10,7 @@ describe('Production Mempool explorer client', () => {
         const http = {
             get: async (url: string) => {
                 requests.push(url);
-                return { data: { confirmed: true } };
+                return { data: { confirmed: true, block_height: 840_000 } };
             },
             post: async () => ({ data: '' })
         } as any;
@@ -23,16 +23,34 @@ describe('Production Mempool explorer client', () => {
         ]);
     });
 
-    it('maps and validates Esplora UTXO responses', async () => {
+    it('accepts an explorer base URL that already ends in /api', async () => {
+        const requests: string[] = [];
         const http = {
-            get: async () => ({
-                data: [{
+            get: async (url: string) => {
+                requests.push(url);
+                return { data: 840_000 };
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example/api/', http);
+
+        expect(client.baseUrl).to.equal('https://explorer.example');
+        expect(await client.getTipHeight()).to.equal(840_000);
+        expect(requests).to.deep.equal(['https://explorer.example/api/blocks/tip/height']);
+    });
+
+    it('maps and validates Esplora UTXO responses', async () => {
+        const requests: string[] = [];
+        const http = {
+            get: async (url: string) => {
+                requests.push(url);
+                return { data: [{
                     txid: 'cd'.repeat(32),
                     vout: 2,
                     value: 42_000,
-                    status: { confirmed: false }
-                }]
-            }),
+                    status: { confirmed: true, block_height: 839_999 }
+                }] };
+            },
             post: async () => ({ data: '' })
         } as any;
         const client = new MempoolExplorerClient('https://explorer.example', http);
@@ -41,8 +59,64 @@ describe('Production Mempool explorer client', () => {
             txid: 'cd'.repeat(32),
             vout: 2,
             amount: 42_000,
-            confirmations: 0
+            confirmations: 1
         }]);
+        expect(requests).to.deep.equal([
+            'https://explorer.example/api/address/bc1ptest/utxo'
+        ]);
+    });
+
+    it('posts raw transaction hex as text/plain and validates the returned txid', async () => {
+        const requests: Array<{ url: string; body: string; config: any }> = [];
+        const expectedTxid = 'ef'.repeat(32);
+        const http = {
+            get: async () => ({ data: {} }),
+            post: async (url: string, body: string, config: any) => {
+                requests.push({ url, body, config });
+                return { data: ` ${expectedTxid}\n` };
+            }
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http, 4321);
+
+        expect(await client.broadcastTransaction('02000000')).to.equal(expectedTxid);
+        expect(requests).to.deep.equal([{
+            url: 'https://explorer.example/api/tx',
+            body: '02000000',
+            config: { timeout: 4321, headers: { 'Content-Type': 'text/plain' } }
+        }]);
+
+        http.post = async () => ({ data: 'not-a-64-character-txid' });
+        try {
+            await client.broadcastTransaction('02000000');
+            expect.fail('Expected a malformed txid response to fail');
+        } catch (error) {
+            expect(error).to.be.instanceOf(ExplorerRequestError);
+            expect((error as Error).message).to.contain('invalid transaction id');
+        }
+    });
+
+    it('uses the tip-height endpoint and accepts genesis height zero', async () => {
+        const requests: string[] = [];
+        const http = {
+            get: async (url: string) => {
+                requests.push(url);
+                return { data: '0' };
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http);
+
+        expect(await client.getTipHeight()).to.equal(0);
+        expect(requests).to.deep.equal(['https://explorer.example/api/blocks/tip/height']);
+
+        http.get = async () => ({ data: -1 });
+        try {
+            await client.getTipHeight();
+            expect.fail('Expected a negative height to fail');
+        } catch (error) {
+            expect(error).to.be.instanceOf(ExplorerRequestError);
+            expect((error as Error).message).to.contain('invalid chain height');
+        }
     });
 
     it('rejects malformed explorer data instead of treating it as an empty wallet', async () => {
@@ -62,24 +136,73 @@ describe('Production Mempool explorer client', () => {
     });
 
     it('validates the Mempool-specific recommended fee contract', async () => {
+        const requests: string[] = [];
         const http = {
-            get: async () => ({
-                data: {
-                    fastestFee: 8,
-                    halfHourFee: 5,
-                    hourFee: 3,
-                    economyFee: 2,
-                    minimumFee: 1
-                }
-            }),
+            get: async (url: string) => {
+                requests.push(url);
+                return {
+                    data: {
+                        fastestFee: 8.25,
+                        halfHourFee: 5.5,
+                        hourFee: 3.75,
+                        economyFee: 2.1,
+                        minimumFee: 1.01
+                    }
+                };
+            },
             post: async () => ({ data: '' })
         } as any;
         const client = new MempoolExplorerClient('https://explorer.example', http);
 
         expect(await client.getRecommendedFees()).to.include({
-            halfHourFee: 5,
-            minimumFee: 1
+            halfHourFee: 5.5,
+            minimumFee: 1.01
         });
+        expect(requests).to.deep.equal([
+            'https://explorer.example/api/v1/fees/recommended'
+        ]);
+    });
+
+    it('propagates HTTP status and text response details through ExplorerRequestError', async () => {
+        const http = {
+            get: async () => {
+                throw {
+                    message: 'Request failed with status code 429',
+                    response: { status: 429, data: 'rate limit exceeded' }
+                };
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http);
+
+        try {
+            await client.getTipHeight();
+            expect.fail('Expected HTTP failure');
+        } catch (error) {
+            expect(error).to.be.instanceOf(ExplorerRequestError);
+            expect((error as ExplorerRequestError).status).to.equal(429);
+            expect((error as ExplorerRequestError).operation).to.equal('Chain-tip lookup');
+            expect((error as Error).message).to.equal(
+                'Chain-tip lookup failed (HTTP 429): rate limit exceeded'
+            );
+        }
+    });
+
+    it('propagates network errors without inventing an HTTP status', async () => {
+        const http = {
+            get: async () => { throw new Error('socket hang up'); },
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http);
+
+        try {
+            await client.getTipHeight();
+            expect.fail('Expected network failure');
+        } catch (error) {
+            expect(error).to.be.instanceOf(ExplorerRequestError);
+            expect((error as ExplorerRequestError).status).to.equal(undefined);
+            expect((error as Error).message).to.equal('Chain-tip lookup failed: socket hang up');
+        }
     });
 
     it('requires HTTPS for non-local production explorers', () => {
