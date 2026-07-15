@@ -137,6 +137,20 @@ BIP110_EXPLORER_URL=https://your-bip110-mempool.example \
 npm run server:mainnet
 ```
 
+Coordinator fees are disabled by default. To require funding transactions from makers (initiators)
+and takers (acceptors) to pay the coordinator, configure percentage values and a receive address:
+
+```bash
+MAKER_FEE_PERCENT=0.25 \
+TAKER_FEE_PERCENT=0.50 \
+COORDINATOR_RECEIVE_ADDR=bc1p... \
+npm run server:mainnet
+```
+
+Percentages are applied to the swap amount on the chain being locked and rounded up to the next satoshi.
+Outputs to the receive address are summed. `COORDINATOR_RECEIVE_ADDR` may be omitted while both fees remain
+at their default `0` percent.
+
 The frontend uses same-origin `/api` in production. Set `VITE_API_BASE_URL` at build time only when the backend is hosted on a different origin.
 
 ---

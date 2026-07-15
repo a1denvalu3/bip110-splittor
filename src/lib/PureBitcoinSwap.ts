@@ -295,7 +295,9 @@ export class PureBitcoinSwap {
         htlcAddr: string,
         changeAddr?: string,
         feeSats: bigint = 5000n,
-        network: bitcoin.Network = bitcoin.networks.regtest
+        network: bitcoin.Network = bitcoin.networks.regtest,
+        coordinatorAddress?: string,
+        coordinatorFeeSats: bigint = 0n
     ): bitcoin.Transaction {
         const tx = new bitcoin.Transaction();
         tx.version = 2;
@@ -307,15 +309,20 @@ export class PureBitcoinSwap {
 
         const totalInputSats = inputs.reduce((sum, input) => sum + input.amount, 0n);
         let finalOutputSats = outputSats;
-        let changeSats = totalInputSats - finalOutputSats - feeSats;
+        let changeSats = totalInputSats - finalOutputSats - coordinatorFeeSats - feeSats;
 
         if (changeSats < 0n) {
-            finalOutputSats = totalInputSats - feeSats;
+            finalOutputSats = totalInputSats - coordinatorFeeSats - feeSats;
             changeSats = 0n;
         }
 
         // 1. Add HTLC contract output
         tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), finalOutputSats);
+
+        if (coordinatorFeeSats > 0n) {
+            if (!coordinatorAddress) throw new Error('Coordinator address is required for a non-zero coordinator fee');
+            tx.addOutput(bitcoin.address.toOutputScript(coordinatorAddress, network), coordinatorFeeSats);
+        }
 
         // 2. Add change output if there's leftover change and a change address is provided
         if (changeSats > 0n && changeAddr) {

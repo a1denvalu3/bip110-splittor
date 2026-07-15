@@ -80,6 +80,21 @@ export class MempoolExplorerClient {
         }
     }
 
+    async getRawTransaction(txid: string): Promise<string> {
+        try {
+            const response = await this.http.get(this.api(`/tx/${encodeURIComponent(txid)}/hex`), {
+                timeout: this.timeoutMs
+            });
+            if (typeof response.data !== 'string' || !/^[0-9a-f]+$/i.test(response.data) || response.data.length % 2 !== 0) {
+                throw new Error('Explorer returned invalid raw transaction hex');
+            }
+            return response.data;
+        } catch (error) {
+            if (error instanceof ExplorerRequestError) throw error;
+            throw new ExplorerRequestError('Raw transaction lookup', error);
+        }
+    }
+
     async getAddressUtxos(address: string): Promise<ExplorerUtxo[]> {
         try {
             const response = await this.http.get(this.api(`/address/${encodeURIComponent(address)}/utxo`), {

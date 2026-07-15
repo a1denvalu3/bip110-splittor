@@ -230,4 +230,27 @@ describe('Pure Bitcoinjs-Lib Optimized Swap Tests', () => {
         expect(tx.ins[1].witness).to.not.be.undefined;
         expect(tx.ins[1].witness!.length).to.equal(1);
     });
+
+    it('7. HTLC funding can include a coordinator payment without reducing the contract output', () => {
+        const recipientKeyPair = PureBitcoinSwap.generateKeyPair();
+        const recipientPubKey = Buffer.from(recipientKeyPair.publicKey);
+        const payment = bitcoin.payments.p2tr({
+            internalPubkey: PureBitcoinSwap.getXOnlyPubKey(recipientPubKey),
+            network: bitcoin.networks.regtest
+        });
+        const coordinator = bitcoin.payments.p2wpkh({
+            hash: Buffer.alloc(20, 3),
+            network: bitcoin.networks.regtest
+        }).address!;
+        const input = {
+            txid: '33'.repeat(32), vout: 0, amount: 200000n,
+            keyPair: recipientKeyPair, merkleRoot: Buffer.alloc(0), paymentOutput: payment.output!
+        };
+        const tx = PureBitcoinSwap.buildMultiInputHtlcFundingTx(
+            [input], 180000n, payment.address!, payment.address!, 10000n,
+            bitcoin.networks.regtest, coordinator, 2500n
+        );
+        expect(tx.outs.map(output => output.value)).to.deep.equal([180000n, 2500n, 7500n]);
+        expect(Buffer.from(tx.outs[1].script).equals(bitcoin.address.toOutputScript(coordinator, bitcoin.networks.regtest))).to.equal(true);
+    });
 });

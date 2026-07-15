@@ -136,6 +136,12 @@ interface Offer {
   acceptorClaimed?: boolean;
 }
 
+interface CoordinatorFees {
+  makerFeePercent: string;
+  takerFeePercent: string;
+  receiveAddress: string;
+}
+
 export default function App() {
   // Navigation & Network Mode
   const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard'>('wallet');
@@ -643,6 +649,31 @@ export default function App() {
     return rate;
   };
 
+  const getCoordinatorFees = async (): Promise<CoordinatorFees> => {
+    const res = await axios.get(`${API_BASE}/fees/coordinator`, { timeout: 5000 });
+    const makerFeePercent = String(res.data?.makerFeePercent ?? '');
+    const takerFeePercent = String(res.data?.takerFeePercent ?? '');
+    const receiveAddress = String(res.data?.receiveAddress ?? '');
+    for (const [name, value] of [['maker', makerFeePercent], ['taker', takerFeePercent]]) {
+      if (!/^(?:\d+)(?:\.\d+)?$/.test(value) || Number(value) > 100) {
+        throw new Error(`Server returned an invalid ${name} coordinator fee`);
+      }
+    }
+    if ((Number(makerFeePercent) > 0 || Number(takerFeePercent) > 0) && !receiveAddress) {
+      throw new Error('Server coordinator fee configuration has no receive address');
+    }
+    return { makerFeePercent, takerFeePercent, receiveAddress };
+  };
+
+  const coordinatorFeeSats = (amountSats: number, percent: string): bigint => {
+    const [whole, fraction = ''] = percent.split('.');
+    const scale = 10n ** BigInt(fraction.length);
+    const numerator = BigInt(whole) * scale + BigInt(fraction || '0');
+    const denominator = 100n * scale;
+    const product = BigInt(amountSats) * numerator;
+    return (product + denominator - 1n) / denominator;
+  };
+
   // Dynamically calculate transaction fee in Satoshis depending on active network mode
   const calculateTxFee = async (
     txType: 'split-script' | 'split-keypath' | 'funding' | 'claim' | 'refund' | 'withdraw',
@@ -690,7 +721,7 @@ export default function App() {
     return feeSats;
   };
 
-  const createFundingFeeEstimator = async (chain: 'main' | 'bip110'): Promise<FundingFeeEstimator> => {
+  const createFundingFeeEstimator = async (chain: 'main' | 'bip110', coordinatorOutput = false): Promise<FundingFeeEstimator> => {
     if (networkMode === 'regtest') {
       return (inputCount: number) => 5000 + Math.max(0, inputCount - 1) * 1000;
     }
@@ -698,7 +729,7 @@ export default function App() {
     const mempoolRate = await getRecommendedFeeRate(chain);
     const finalRate = mempoolRate + Math.min(5, mempoolRate);
     return (inputCount: number, hasChange: boolean) => {
-      const baseVbytes = hasChange ? 160 : 115;
+      const baseVbytes = (hasChange ? 160 : 115) + (coordinatorOutput ? 43 : 0);
       const additionalInputVbytes = Math.max(0, inputCount - 1) * 68;
       return Math.ceil((baseVbytes + additionalInputVbytes) * finalRate);
     };
@@ -1527,6 +1558,7 @@ export default function App() {
     e.preventDefault();
     setPublishing(true);
     try {
+      const coordinatorFees = await getCoordinatorFees();
       if (!selectedBackingUtxoKey) {
         throw new Error("Please select a split UTXO to back this offer.");
       }
@@ -1546,17 +1578,18 @@ export default function App() {
       }
 
       const fundingCandidates = getSplitUtxosForChain(backingChain!);
-      const estimateFundingFee = await createFundingFeeEstimator(backingChain!);
+      const coordinatorFee = coordinatorFeeSats(sellAmount, coordinatorFees.makerFeePercent);
+      const estimateFundingFee = await createFundingFeeEstimator(backingChain!, coordinatorFee > 0n);
       const fundingSelection = selectFundingUtxos(
         fundingCandidates,
-        BigInt(sellAmount),
+        BigInt(sellAmount) + coordinatorFee,
         estimateFundingFee,
         utxo
       );
       if (!fundingSelection) {
         const totalAvailable = fundingCandidates.reduce((sum, candidate) => sum + candidate.amount, 0);
         const minimumFee = estimateFundingFee(Math.max(1, fundingCandidates.length), false);
-        const maximumFundable = Math.max(0, totalAvailable - minimumFee);
+        const maximumFundable = Math.max(0, totalAvailable - minimumFee - Number(coordinatorFee));
         throw new Error(
           `Insufficient ${backingChain === 'main' ? 'BTC' : 'B110'} split balance for this offer plus fees. ` +
           `Maximum fundable amount is approximately ${maximumFundable.toLocaleString()} sats.`
@@ -1624,15 +1657,20 @@ export default function App() {
   };
 
   const acceptOffer = async (offer: Offer) => {
-    const match = getMatchingTakerUtxo(offer);
-    if (!match) {
-      const requiredChain = (!offer.backingChain || offer.backingChain === 'bip110') ? 'BTC' : 'BIP110';
-      const requiredAmount = (!offer.backingChain || offer.backingChain === 'bip110') ? offer.acceptorBtcAmount : offer.initiatorB110Amount;
-      showToast(`Cannot accept offer: you need a split ${requiredChain} UTXO with at least ${(requiredAmount / 100000000).toFixed(4)} to accept this offer!`, 'error');
-      return;
-    }
-
     try {
+      const coordinatorFees = await getCoordinatorFees();
+      const targetChain: 'main' | 'bip110' = offer.backingChain === 'main' ? 'bip110' : 'main';
+      const targetAmount = targetChain === 'main' ? offer.acceptorBtcAmount : offer.initiatorB110Amount;
+      const coordinatorFee = coordinatorFeeSats(targetAmount, coordinatorFees.takerFeePercent);
+      const estimateFundingFee = await createFundingFeeEstimator(targetChain, coordinatorFee > 0n);
+      const fundingSelection = selectFundingUtxos(
+        getSplitUtxosForChain(targetChain),
+        BigInt(targetAmount) + coordinatorFee,
+        estimateFundingFee
+      );
+      if (!fundingSelection) {
+        throw new Error(`insufficient split ${targetChain === 'main' ? 'BTC' : 'BIP110'} balance for the contract, coordinator fee, and network fee`);
+      }
       const res = await axios.post(`${API_BASE}/offers/${offer.id}/accept`, {
         acceptorPubKey: publicKey
       });
@@ -1655,6 +1693,8 @@ export default function App() {
         const isBtcBacking = selectedOffer.backingChain === 'main';
         const targetChain: 'main' | 'bip110' = isBtcBacking ? 'main' : 'bip110';
         const targetAmount = isBtcBacking ? selectedOffer.acceptorBtcAmount : selectedOffer.initiatorB110Amount;
+        const coordinatorFees = await getCoordinatorFees();
+        const coordinatorFee = coordinatorFeeSats(targetAmount, coordinatorFees.makerFeePercent);
 
         showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
         
@@ -1684,10 +1724,10 @@ export default function App() {
         }
 
         const targetSats = BigInt(targetAmount);
-        const estimateFundingFee = await createFundingFeeEstimator(targetChain);
+        const estimateFundingFee = await createFundingFeeEstimator(targetChain, coordinatorFee > 0n);
         const fundingSelection = selectFundingUtxos(
           fundingCandidates,
-          targetSats,
+          targetSats + coordinatorFee,
           estimateFundingFee,
           preferredUtxo
         );
@@ -1711,7 +1751,9 @@ export default function App() {
           htlc.address!,
           changeAddress,
           fundingSelection.feeSats,
-          net
+          net,
+          coordinatorFees.receiveAddress,
+          coordinatorFee
         );
 
         // 4. Broadcast via server
@@ -1744,6 +1786,8 @@ export default function App() {
         const isBtcBacking = selectedOffer.backingChain === 'main';
         const targetChain: 'main' | 'bip110' = isBtcBacking ? 'bip110' : 'main';
         const targetAmount = isBtcBacking ? selectedOffer.initiatorB110Amount : selectedOffer.acceptorBtcAmount;
+        const coordinatorFees = await getCoordinatorFees();
+        const coordinatorFee = coordinatorFeeSats(targetAmount, coordinatorFees.takerFeePercent);
 
         // Security check first: Verify the initiator's first HTLC address matches the expected script
         const firstHtlcAddress = isBtcBacking ? selectedOffer.btcHtlcAddress! : selectedOffer.b110HtlcAddress!;
@@ -1784,8 +1828,8 @@ export default function App() {
         // 2. Select enough split outputs of the acceptor to fund the contract and fee.
         const candidates = getSplitUtxosForChain(targetChain);
         const targetSats = BigInt(targetAmount);
-        const estimateFundingFee = await createFundingFeeEstimator(targetChain);
-        const fundingSelection = selectFundingUtxos(candidates, targetSats, estimateFundingFee);
+        const estimateFundingFee = await createFundingFeeEstimator(targetChain, coordinatorFee > 0n);
+        const fundingSelection = selectFundingUtxos(candidates, targetSats + coordinatorFee, estimateFundingFee);
 
         if (!fundingSelection) {
           const totalAvailable = candidates.reduce((sum, candidate) => sum + candidate.amount, 0);
@@ -1807,7 +1851,9 @@ export default function App() {
           htlc.address!,
           changeAddress,
           fundingSelection.feeSats,
-          net
+          net,
+          coordinatorFees.receiveAddress,
+          coordinatorFee
         );
 
         // 4. Broadcast via server

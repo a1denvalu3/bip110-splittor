@@ -5,6 +5,7 @@ import { ECPairFactory } from 'ecpair';
 import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
 import { ExplorerChain, ExplorerRequestError, MempoolExplorerClient } from './explorer';
+import { assertCoordinatorFee, loadCoordinatorFeeConfig } from './coordinatorFees';
 
 import { runMigrations } from './database/migrations';
 import {
@@ -23,6 +24,7 @@ const ECPair = ECPairFactory(ecc);
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const COORDINATOR_FEES = loadCoordinatorFeeConfig();
 
 app.use(cors());
 app.use(express.json());
@@ -74,6 +76,7 @@ const NETWORK_MODE: 'mainnet' | 'regtest' =
     : 'regtest';
 
 console.log(`[BOOT] BIP110 Splittoooor Backend starting up in [${NETWORK_MODE.toUpperCase()}] mode.`);
+console.log(`[BOOT] Coordinator fees: maker=${COORDINATOR_FEES.makerFeePercent}%, taker=${COORDINATOR_FEES.takerFeePercent}%.`);
 
 const BITCOIN_EXPLORER_URL = (process.env.BITCOIN_EXPLORER_URL || 'https://mempool.space').trim();
 const BIP110_EXPLORER_URL = process.env.BIP110_EXPLORER_URL?.trim() || '';
@@ -276,6 +279,10 @@ async function initNodeWallets() {
 // STANDARD MARKETPLACE & BLOCK EXPLORER ENDPOINTS
 // ==========================================
 
+app.get('/api/fees/coordinator', (_req: Request, res: Response) => {
+    res.json(COORDINATOR_FEES);
+});
+
 async function getTxConfirmations(
     txid: string | undefined,
     chain: 'main' | 'bip110',
@@ -293,6 +300,18 @@ async function getTxConfirmations(
     } catch {
         return 0;
     }
+}
+
+async function getRawTransaction(txid: string, chain: ExplorerChain): Promise<string> {
+    if (NETWORK_MODE === 'mainnet') return getMainnetExplorer(chain).getRawTransaction(txid);
+    const rpc = chain === 'bip110' ? bip110MinerRpc : mainMinerRpc;
+    return rpc.call('getrawtransaction', [txid, false]);
+}
+
+function fundingChainFor(offer: Offer, signer: 'initiator' | 'acceptor'): ExplorerChain {
+    if (!offer.backingChain) throw new Error('Offer has no backing chain');
+    if (signer === 'initiator') return offer.backingChain;
+    return offer.backingChain === 'main' ? 'bip110' : 'main';
 }
 
 // 1. Get Marketplace Offers
@@ -528,7 +547,45 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
             return res.status(401).json({ error: "Signature verification failed: " + sigErr.message });
         }
 
-        // 4. Update database fields cleanly
+        // 4. Funding updates must pay the configured role fee in the actual on-chain transaction.
+        const fundingChain = fundingChainFor(offer, signer);
+        const fundingTxid = fundingChain === 'main' ? fields.btcHtlcTxid : fields.b110HtlcTxid;
+        const otherFundingTxid = fundingChain === 'main' ? fields.b110HtlcTxid : fields.btcHtlcTxid;
+        const expectedFundingStatus = signer === 'initiator' ? 'FUNDED_INITIATOR' : 'FUNDED_ACCEPTOR';
+        if (otherFundingTxid !== undefined) {
+            return res.status(400).json({ error: `${signer} cannot register a funding transaction for the other swap chain` });
+        }
+        if (fields.status === expectedFundingStatus && fundingTxid === undefined) {
+            return res.status(400).json({ error: `${expectedFundingStatus} requires the ${fundingChain} HTLC funding transaction id` });
+        }
+        if (fields.status === 'FUNDED_INITIATOR' && signer !== 'initiator') {
+            return res.status(400).json({ error: 'Only the initiator can complete initiator funding' });
+        }
+        if (fields.status === 'FUNDED_ACCEPTOR' && signer !== 'acceptor') {
+            return res.status(400).json({ error: 'Only the acceptor can complete acceptor funding' });
+        }
+        if (fundingTxid !== undefined) {
+            if (typeof fundingTxid !== 'string' || !/^[0-9a-f]{64}$/i.test(fundingTxid)) {
+                return res.status(400).json({ error: 'Invalid HTLC funding transaction id' });
+            }
+            try {
+                const rawTransaction = await getRawTransaction(fundingTxid, fundingChain);
+                const transaction = bitcoin.Transaction.fromHex(rawTransaction);
+                if (transaction.getId().toLowerCase() !== fundingTxid.toLowerCase()) {
+                    return res.status(400).json({ error: 'HTLC funding transaction id does not match transaction data' });
+                }
+                const amount = fundingChain === 'main' ? offer.acceptorBtcAmount : offer.initiatorB110Amount;
+                const percent = signer === 'initiator'
+                    ? COORDINATOR_FEES.makerFeePercent
+                    : COORDINATOR_FEES.takerFeePercent;
+                const network = NETWORK_MODE === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
+                assertCoordinatorFee(rawTransaction, BigInt(amount), percent, COORDINATOR_FEES.receiveAddress, network);
+            } catch (feeErr: any) {
+                return res.status(400).json({ error: `Invalid coordinator fee: ${feeErr.message}` });
+            }
+        }
+
+        // 5. Update database fields cleanly
         await updateOfferFieldsById(id, fields);
 
         const updatedOffer = await getOfferById(id);
