@@ -2739,13 +2739,13 @@ export default function App() {
               </div>
             </CollapsibleCard>
 
-            {/* Faucet Card (Regtest only) OR Production Instructions Card */}
+            {/* Regtest-only faucet controls. Mainnet deposits use the primary address panel above. */}
+            {networkMode === 'regtest' && (
             <CollapsibleCard
-              title={networkMode === 'regtest' ? "Regtest Faucet & Node Funder" : "Mainnet Funding Instructions"}
-              icon={networkMode === 'regtest' ? Coins : Sparkles}
-              defaultOpen={networkMode === 'regtest'}
+              title="Regtest Faucet & Node Funder"
+              icon={Coins}
+              defaultOpen={true}
             >
-              {networkMode === 'regtest' ? (
                 <>
                   <p className="text-xs text-slate-400 mb-6">
                     Fund your local regtest environment and send simulated coins to the deposit address shown at the top of this page.
@@ -2813,30 +2813,8 @@ export default function App() {
                     </div>
                   </div>
                 </>
-              ) : (
-                <>
-                  <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                    Send real BTC or BIP110 funds to the clearly marked <strong className="text-slate-200">Deposit Destination</strong> at the top of this page.
-                  </p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs mt-4">
-                    <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
-                      <h4 className="font-semibold text-slate-200 mb-1.5">For Bitcoin Mainnet</h4>
-                      <p className="text-slate-400 mb-3">Send BTC to the deposit address shown above. Track confirmations using a Bitcoin block explorer.</p>
-                      <a href={`https://mempool.space/address/${splitAddress}`} target="_blank" rel="noreferrer" className="text-amber-400 hover:underline flex items-center gap-1 font-semibold">
-                        View on Mempool.space <ExternalLink className="w-3 h-3" />
-                      </a>
-                    </div>
-                    <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
-                      <h4 className="font-semibold text-slate-200 mb-1.5">For BIP110-Chain</h4>
-                      <p className="text-slate-400 mb-3">Send BIP110 assets to the same deposit address shown above and wait for confirmation.</p>
-                      <span className="text-slate-500 flex items-center gap-1 font-medium">
-                        Requires BIP110 Wallet connection
-                      </span>
-                    </div>
-                  </div>
-                </>
-              )}
             </CollapsibleCard>
+            )}
 
             {/* UTXOs Monitor */}
             <CollapsibleCard
