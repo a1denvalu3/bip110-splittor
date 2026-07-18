@@ -66,6 +66,39 @@ describe('Production Mempool explorer client', () => {
         ]);
     });
 
+    it('fetches raw transaction hex from the Esplora transaction endpoint', async () => {
+        const requests: string[] = [];
+        const txid = 'ab'.repeat(32);
+        const rawTransaction = '02000000000100';
+        const http = {
+            get: async (url: string) => {
+                requests.push(url);
+                return { data: rawTransaction };
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http, 4321);
+
+        expect(await client.getRawTransaction(txid)).to.equal(rawTransaction);
+        expect(requests).to.deep.equal([`https://explorer.example/api/tx/${txid}/hex`]);
+    });
+
+    it('rejects malformed raw transaction responses', async () => {
+        const http = {
+            get: async () => ({ data: 'not transaction hex' }),
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http);
+
+        try {
+            await client.getRawTransaction('ab'.repeat(32));
+            expect.fail('Expected malformed transaction hex to fail');
+        } catch (error) {
+            expect(error).to.be.instanceOf(ExplorerRequestError);
+            expect((error as Error).message).to.contain('invalid raw transaction hex');
+        }
+    });
+
     it('posts raw transaction hex as text/plain and validates the returned txid', async () => {
         const requests: Array<{ url: string; body: string; config: any }> = [];
         const expectedTxid = 'ef'.repeat(32);

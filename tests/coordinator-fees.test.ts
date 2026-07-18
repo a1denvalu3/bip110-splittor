@@ -2,6 +2,7 @@ import { expect } from 'chai';
 import * as bitcoin from 'bitcoinjs-lib';
 import {
     assertCoordinatorFee,
+    coordinatorOutputValue,
     loadCoordinatorFeeConfig,
     requiredCoordinatorFee
 } from '../webapp/backend/coordinatorFees';
@@ -9,11 +10,16 @@ import {
 describe('Coordinator fees', () => {
     const network = bitcoin.networks.regtest;
     const address = bitcoin.payments.p2wpkh({ hash: Buffer.alloc(20, 7), network }).address!;
+    const otherAddress = bitcoin.payments.p2wpkh({ hash: Buffer.alloc(20, 8), network }).address!;
 
-    function transactionWithPayments(payments: bigint[]): string {
+    function transactionWithPayments(payments: Array<bigint | { address: string; value: bigint }>): string {
         const tx = new bitcoin.Transaction();
         tx.addInput(Buffer.alloc(32), 0);
-        for (const value of payments) tx.addOutput(bitcoin.address.toOutputScript(address, network), value);
+        for (const payment of payments) {
+            const destination = typeof payment === 'bigint' ? address : payment.address;
+            const value = typeof payment === 'bigint' ? payment : payment.value;
+            tx.addOutput(bitcoin.address.toOutputScript(destination, network), value);
+        }
         return tx.toHex();
     }
 
@@ -35,10 +41,39 @@ describe('Coordinator fees', () => {
         expect(requiredCoordinatorFee(100_000n, '1')).to.equal(1_000n);
     });
 
-    it('sums coordinator outputs and rejects underpayment', () => {
-        assertCoordinatorFee(transactionWithPayments([10n, 16n]), 10_001n, '0.25', address, network);
+    it('accepts an output paying exactly the required fee', () => {
+        assertCoordinatorFee(transactionWithPayments([26n]), 10_001n, '0.25', address, network);
+    });
+
+    it('accepts overpayment', () => {
+        assertCoordinatorFee(transactionWithPayments([27n]), 10_001n, '0.25', address, network);
+    });
+
+    it('sums multiple outputs to the coordinator address', () => {
+        const rawTransaction = transactionWithPayments([10n, 16n]);
+        expect(coordinatorOutputValue(rawTransaction, address, network)).to.equal(26n);
+        assertCoordinatorFee(rawTransaction, 10_001n, '0.25', address, network);
+    });
+
+    it('rejects an underpaid coordinator output', () => {
         expect(() => assertCoordinatorFee(transactionWithPayments([25n]), 10_001n, '0.25', address, network))
             .to.throw('required at least 26 sats, found 25 sats');
+    });
+
+    it('rejects a transaction with no coordinator output', () => {
+        const rawTransaction = transactionWithPayments([{ address: otherAddress, value: 1_000n }]);
+        expect(() => assertCoordinatorFee(rawTransaction, 10_000n, '1', address, network))
+            .to.throw('required at least 100 sats, found 0 sats');
+    });
+
+    it('does not count outputs sent to a different address', () => {
+        const rawTransaction = transactionWithPayments([
+            { address: otherAddress, value: 100n },
+            { address, value: 99n }
+        ]);
+        expect(coordinatorOutputValue(rawTransaction, address, network)).to.equal(99n);
+        expect(() => assertCoordinatorFee(rawTransaction, 10_000n, '1', address, network))
+            .to.throw('required at least 100 sats, found 99 sats');
     });
 
     it('does not parse an address or transaction when the role fee is disabled', () => {
