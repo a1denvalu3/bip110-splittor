@@ -193,6 +193,11 @@ export default function App() {
   const [ownBip110Balance, setOwnBip110Balance] = useState<number>(0);
   const [ownMainUtxos, setOwnMainUtxos] = useState<UTXO[]>([]);
   const [ownBip110Utxos, setOwnBip110Utxos] = useState<UTXO[]>([]);
+  const [balanceSyncStatus, setBalanceSyncStatus] = useState<'idle' | 'loading' | 'ready' | 'rate-limited' | 'error'>('idle');
+  const [hasBalanceSnapshot, setHasBalanceSnapshot] = useState<boolean>(false);
+  const balanceFetchInFlightRef = useRef<boolean>(false);
+  const balanceRefreshQueuedRef = useRef<boolean>(false);
+  const balanceRetryAfterRef = useRef<number>(0);
 
   // Selected UTXO to split
   const [nodeInfo, setNodeInfo] = useState<{ mainHeight: number; bip110Height: number }>({ mainHeight: 0, bip110Height: 0 });
@@ -247,6 +252,29 @@ export default function App() {
   // Helpers
   const getNetwork = (): bitcoin.Network => {
     return networkMode === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
+  };
+
+  const getSecondHtlcLockTime = (offer: Offer, network: bitcoin.Network): number => {
+    const intendedLockTime = Math.round(offer.lockTime / 2);
+    const secondHtlcAddress = offer.backingChain === 'main' ? offer.b110HtlcAddress : offer.btcHtlcAddress;
+    if (!secondHtlcAddress || !offer.acceptorPubKey) return intendedLockTime;
+
+    const commonArgs = [
+      secondHtlcAddress,
+      Buffer.from(offer.initiatorPubKey, 'hex'),
+      Buffer.from(offer.hashLock, 'hex'),
+      Buffer.from(offer.initiatorPubKey, 'hex'),
+      Buffer.from(offer.acceptorPubKey, 'hex')
+    ] as const;
+
+    if (PureBitcoinSwap.verifyTaprootHtlcAddress(...commonArgs, intendedLockTime, network)) {
+      return intendedLockTime;
+    }
+    // Compatibility for swaps funded before the acceptor HTLC correctly used T/2.
+    if (PureBitcoinSwap.verifyTaprootHtlcAddress(...commonArgs, offer.lockTime, network)) {
+      return offer.lockTime;
+    }
+    throw new Error('The acceptor HTLC address does not match either the expected T/2 contract or the legacy T contract.');
   };
 
   const formatLockTimeDisplay = (lockTime: number, isHalf: boolean = false, backingChain: 'main' | 'bip110' = 'main') => {
@@ -443,6 +471,13 @@ export default function App() {
     const isBtcBacking = selectedOffer.backingChain === 'main';
 
     try {
+      const hasRefundableEscrow = isInitiator
+        ? selectedOffer.status === 'FUNDED_INITIATOR' || selectedOffer.status === 'FUNDED_ACCEPTOR'
+        : selectedOffer.acceptorPubKey === publicKey && selectedOffer.status === 'FUNDED_ACCEPTOR';
+      if (!hasRefundableEscrow) {
+        throw new Error('You have not funded an HTLC in the current swap state, so there is nothing to refund.');
+      }
+
       if (isInitiator) {
         // Initiator refunds the first HTLC after lockTime (T)
         const targetChain = isBtcBacking ? 'main' : 'bip110';
@@ -519,7 +554,7 @@ export default function App() {
         const targetChain = isBtcBacking ? 'bip110' : 'main';
         const targetAddress = isBtcBacking ? selectedOffer.b110HtlcAddress! : selectedOffer.btcHtlcAddress!;
         const currentHeight = isBtcBacking ? nodeInfo.bip110Height : nodeInfo.mainHeight;
-        const requiredLockTime = Math.round(selectedOffer.lockTime / 2);
+        const requiredLockTime = getSecondHtlcLockTime(selectedOffer, net);
 
         if (currentHeight < requiredLockTime) {
           throw new Error(`Cannot refund yet: current block height is ${currentHeight}, but refund locktime is ${requiredLockTime}. Please mine more blocks first.`);
@@ -548,7 +583,7 @@ export default function App() {
           Buffer.from(selectedOffer.hashLock, 'hex'),
           secondHtlcRecipient,
           secondHtlcRefund,
-          selectedOffer.lockTime,
+          requiredLockTime,
           net
         );
 
@@ -565,7 +600,7 @@ export default function App() {
           secondHtlcRecipient,
           htlcPayment,
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
-          selectedOffer.lockTime,
+          requiredLockTime,
           net
         );
 
@@ -925,6 +960,9 @@ export default function App() {
 
   // Load saved master key and active/max index pointers from LocalStorage on mount or networkMode change
   useEffect(() => {
+    setHasBalanceSnapshot(false);
+    setBalanceSyncStatus('loading');
+    balanceRetryAfterRef.current = 0;
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
     const net = getNetwork();
 
@@ -976,7 +1014,7 @@ export default function App() {
     if (splitAddress && ownAddress) {
       fetchBalances();
     }
-  }, [splitAddress, ownAddress, activeTab, networkMode]);
+  }, [splitAddress, ownAddress, activeTab, networkMode, masterPrivateKey, maxIndex]);
 
   // Poll node info, marketplace offers, and wallet balances/UTXOs every 10 seconds for active, real-time updates
   useEffect(() => {
@@ -989,7 +1027,7 @@ export default function App() {
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [networkMode, splitAddress, ownAddress, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
+  }, [networkMode, splitAddress, ownAddress, masterPrivateKey, maxIndex, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
 
   // Keep selectedOffer in sync with the polled offersList to transition wizard steps in real-time
   useEffect(() => {
@@ -1069,6 +1107,9 @@ export default function App() {
         const activeIdx = 0; // reset active index to first derived address
 
         setMasterPrivateKey(masterPriv);
+        setHasBalanceSnapshot(false);
+        setBalanceSyncStatus('loading');
+        balanceRetryAfterRef.current = 0;
         setActiveIndex(activeIdx);
         setMaxIndex(maxIdx);
 
@@ -1197,6 +1238,17 @@ export default function App() {
 
   const fetchBalances = async () => {
     if (!masterPrivateKey) return;
+    if (balanceFetchInFlightRef.current) {
+      balanceRefreshQueuedRef.current = true;
+      return;
+    }
+    if (Date.now() < balanceRetryAfterRef.current) {
+      setBalanceSyncStatus('rate-limited');
+      return;
+    }
+
+    balanceFetchInFlightRef.current = true;
+    setBalanceSyncStatus('loading');
     try {
       const net = getNetwork();
       let aggregatedMainUtxos: any[] = [];
@@ -1204,8 +1256,17 @@ export default function App() {
       let aggregatedOwnMainUtxos: any[] = [];
       let aggregatedOwnBip110Utxos: any[] = [];
 
+      // Async transaction handlers may call this function from a render that predates
+      // a freshly derived change address. The persisted index is updated synchronously,
+      // so use whichever scan boundary is newest.
+      const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
+      const persistedMaxIndex = Number(localStorage.getItem(`${keyPrefix}_max_index`) ?? maxIndex);
+      const scanMaxIndex = Number.isSafeInteger(persistedMaxIndex) && persistedMaxIndex >= 0
+        ? Math.max(maxIndex, persistedMaxIndex)
+        : maxIndex;
+
       // Query unspents for ALL derived addresses from index 0 to maxIndex
-      for (let i = 0; i <= maxIndex; i++) {
+      for (let i = 0; i <= scanMaxIndex; i++) {
         const childKeys = deriveKeysForIndex(masterPrivateKey, i, net);
         
         // 1. Fetch Contract UTXOs (Unsplit)
@@ -1252,20 +1313,31 @@ export default function App() {
       const totalOwnBip110 = aggregatedOwnBip110Utxos.reduce((sum, u) => sum + u.amount, 0);
       setOwnBip110Balance(totalOwnBip110);
 
+      balanceRetryAfterRef.current = 0;
+      setHasBalanceSnapshot(true);
+      setBalanceSyncStatus('ready');
+
       fetchNodeInfo();
     } catch (err: any) {
-      // Never retain a stale one-chain snapshot: classification requires a complete view of both chains.
-      setMainUtxos([]);
-      setBip110Utxos([]);
-      setOwnMainUtxos([]);
-      setOwnBip110Utxos([]);
-      setMainBalance(0);
-      setBip110Balance(0);
-      setOwnMainBalance(0);
-      setOwnBip110Balance(0);
-      setSelectedUtxoToSplit(null);
-      setSelectedBackingUtxoKey('');
+      // Publish only complete cross-chain snapshots. A failed refresh must not turn
+      // a known wallet into an alarming zero balance or empty UTXO set.
+      if (err.response?.status === 429) {
+        const retryAfterHeader = Number(err.response?.headers?.['retry-after']);
+        const retryAfterSeconds = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
+          ? retryAfterHeader
+          : 10;
+        balanceRetryAfterRef.current = Date.now() + retryAfterSeconds * 1000;
+        setBalanceSyncStatus('rate-limited');
+      } else {
+        setBalanceSyncStatus('error');
+      }
       console.error("Error fetching multi-address balances:", err);
+    } finally {
+      balanceFetchInFlightRef.current = false;
+      if (balanceRefreshQueuedRef.current) {
+        balanceRefreshQueuedRef.current = false;
+        window.setTimeout(() => fetchBalances(), 0);
+      }
     }
   };
 
@@ -1291,7 +1363,12 @@ export default function App() {
     if (networkMode === 'mainnet') return;
     try {
       const res = await axios.post(`${API_BASE}/regtest/mine`, { chain, blocks });
-      showToast(`Mined ${blocks} block(s) on ${chain === 'main' ? 'Bitcoin Core' : 'BIP110-Chain'}`, 'success');
+      showToast(
+        chain === 'main'
+          ? `Mined ${blocks} block(s) on Bitcoin Core`
+          : `Mined ${blocks} block(s) on Core first, then ${blocks} on BIP110-Chain`,
+        'success'
+      );
       await fetchBalances();
     } catch (err: any) {
       showToast(`Mining failed: ${err.message}`, 'error');
@@ -1815,13 +1892,14 @@ export default function App() {
         // 1. Generate second HTLC outputs locally
         const secondHtlcRecipient = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
         const secondHtlcRefund = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const secondHtlcLockTime = Math.round(selectedOffer.lockTime / 2);
 
         const htlc = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
           secondHtlcRecipient,
           secondHtlcRefund,
-          selectedOffer.lockTime,
+          secondHtlcLockTime,
           net
         );
 
@@ -1929,12 +2007,13 @@ export default function App() {
 
         // Build and sign claim transaction locally!
         const keyPair = getKeyPairForPubKey(selectedOffer.initiatorPubKey, net);
+        const secondHtlcLockTime = getSecondHtlcLockTime(selectedOffer, net);
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
           secondHtlcRecipient,
           secondHtlcRefund,
-          selectedOffer.lockTime,
+          secondHtlcLockTime,
           net
         );
 
@@ -1951,7 +2030,7 @@ export default function App() {
           htlcPayment,
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           secondHtlcRefund,
-          selectedOffer.lockTime,
+          secondHtlcLockTime,
           net
         );
 
@@ -2398,22 +2477,44 @@ export default function App() {
                   <div className="flex-1">
                     <span className="text-xs text-slate-400 block mb-1">Main-Chain Balance</span>
                     <span className="text-lg sm:text-xl font-bold text-emerald-400">
-                      {((mainBalance + ownMainBalance) / 100000000).toFixed(4)} {networkMode === 'mainnet' ? 'BTC' : 'rBTC'}
+                      {hasBalanceSnapshot
+                        ? `${((mainBalance + ownMainBalance) / 100000000).toFixed(4)} ${networkMode === 'mainnet' ? 'BTC' : 'rBTC'}`
+                        : 'Loading…'}
                     </span>
-                    <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
-                      {(getMainUnsplitBalance() / 100000000).toFixed(4)} Unsplit + {(getMainSplitBalance() / 100000000).toFixed(4)} Split
-                    </span>
+                    {hasBalanceSnapshot && (
+                      <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
+                        {(getMainUnsplitBalance() / 100000000).toFixed(4)} Unsplit + {(getMainSplitBalance() / 100000000).toFixed(4)} Split
+                      </span>
+                    )}
                   </div>
                   <div className="flex-1 border-t sm:border-t-0 sm:border-l border-slate-800 pt-4 sm:pt-0 sm:pl-4">
                     <span className="text-xs text-slate-400 block mb-1">BIP110 Balance</span>
                     <span className="text-lg sm:text-xl font-bold text-sky-400">
-                      {((bip110Balance + ownBip110Balance) / 100000000).toFixed(4)} B110
+                      {hasBalanceSnapshot
+                        ? `${((bip110Balance + ownBip110Balance) / 100000000).toFixed(4)} B110`
+                        : 'Loading…'}
                     </span>
-                    <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
-                      {(getBip110UnsplitBalance() / 100000000).toFixed(4)} Unsplit + {(getBip110SplitBalance() / 100000000).toFixed(4)} Split
-                    </span>
+                    {hasBalanceSnapshot && (
+                      <span className="text-[10px] text-slate-500 block mt-0.5 font-medium leading-none">
+                        {(getBip110UnsplitBalance() / 100000000).toFixed(4)} Unsplit + {(getBip110SplitBalance() / 100000000).toFixed(4)} Split
+                      </span>
+                    )}
                   </div>
                 </div>
+                {balanceSyncStatus !== 'ready' && (
+                  <div className={`mt-4 flex items-center gap-2 rounded-lg border px-3 py-2 text-[10px] font-semibold ${
+                    balanceSyncStatus === 'error'
+                      ? 'border-rose-900/50 bg-rose-950/20 text-rose-300'
+                      : 'border-amber-900/50 bg-amber-950/20 text-amber-300'
+                  }`} role="status" aria-live="polite">
+                    <RefreshCw className={`h-3.5 w-3.5 ${balanceSyncStatus !== 'error' ? 'animate-spin' : ''}`} />
+                    {balanceSyncStatus === 'rate-limited'
+                      ? 'Wallet service is busy. Keeping the last confirmed balances and retrying shortly…'
+                      : balanceSyncStatus === 'error'
+                        ? 'Balance refresh failed. Keeping the last confirmed wallet snapshot.'
+                        : 'Loading wallet balances and UTXOs…'}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -2605,11 +2706,23 @@ export default function App() {
               title="Confirmed UTXO Ledger"
               defaultOpen={true}
             >
+              {balanceSyncStatus !== 'ready' && (
+                <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-900/40 bg-amber-950/15 px-3 py-2.5 text-xs text-amber-300" role="status">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  {balanceSyncStatus === 'rate-limited'
+                    ? 'Rate limited — retaining the last complete UTXO snapshot while we wait to retry.'
+                    : hasBalanceSnapshot
+                      ? 'Refreshing UTXOs; the entries below are the last complete snapshot.'
+                      : 'Loading the complete cross-chain UTXO set…'}
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2.5">Bitcoin UTXOs</h4>
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                    {mainUtxos.length === 0 && ownMainUtxos.length === 0 ? (
+                    {!hasBalanceSnapshot ? (
+                      <div className="text-xs text-amber-300 py-4 text-center border border-dashed border-amber-900/40 rounded-xl">Loading Bitcoin outputs…</div>
+                    ) : mainUtxos.length === 0 && ownMainUtxos.length === 0 ? (
                       <div className="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-800 rounded-xl">No unspent outputs.</div>
                     ) : (
                       <div className="space-y-2">
@@ -2654,7 +2767,9 @@ export default function App() {
                 <div>
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2.5">BIP110 UTXOs</h4>
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                    {bip110Utxos.length === 0 && ownBip110Utxos.length === 0 ? (
+                    {!hasBalanceSnapshot ? (
+                      <div className="text-xs text-amber-300 py-4 text-center border border-dashed border-amber-900/40 rounded-xl">Loading BIP110 outputs…</div>
+                    ) : bip110Utxos.length === 0 && ownBip110Utxos.length === 0 ? (
                       <div className="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-800 rounded-xl">No unspent outputs.</div>
                     ) : (
                       <div className="space-y-2">
@@ -2867,7 +2982,12 @@ export default function App() {
                   </h4>
                   
                   {/* Only outpoints currently present on both chains are eligible for splitting. */}
-                  {getUnsplitUtxosForChain('main').length === 0 ? (
+                  {!hasBalanceSnapshot ? (
+                    <div className="text-center py-8 border border-dashed border-amber-900/40 bg-amber-950/10 rounded-xl text-xs text-amber-300 flex items-center justify-center gap-2" role="status">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      Loading the cross-chain UTXO snapshot…
+                    </div>
+                  ) : getUnsplitUtxosForChain('main').length === 0 ? (
                     <div className="text-center py-8 border border-dashed border-slate-800 bg-slate-950/40 rounded-xl text-xs text-slate-500">
                       No unsplit outputs detected. An output must exist on both chains to be eligible.
                     </div>
@@ -3069,7 +3189,12 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                  {getAvailableSplitUtxos().length === 0 && (
+                  {!hasBalanceSnapshot ? (
+                    <p className="text-xs text-amber-300 mt-2 flex items-center gap-2" role="status">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      Loading available split UTXOs…
+                    </p>
+                  ) : getAvailableSplitUtxos().length === 0 && (
                     <p className="text-xs text-rose-400 mt-2">
                       ⚠️ You have no split UTXOs. Please go to the **Bilateral Splitter** tab to split some coins first!
                     </p>
@@ -3985,11 +4110,16 @@ export default function App() {
                     {/* Safety Refund Panel */}
                     {(selectedOffer.status === 'FUNDED_INITIATOR' || selectedOffer.status === 'FUNDED_ACCEPTOR') && (() => {
                       const isInitiator = selectedOffer.initiatorPubKey === publicKey;
+                      const isAcceptor = selectedOffer.acceptorPubKey === publicKey;
                       const isBtcBacking = selectedOffer.backingChain === 'main';
+                      const hasFundedHtlc = isInitiator
+                        || (isAcceptor && selectedOffer.status === 'FUNDED_ACCEPTOR');
+
+                      if (!hasFundedHtlc) return null;
 
                       const targetLocktime = isInitiator 
                         ? selectedOffer.lockTime 
-                        : Math.round(selectedOffer.lockTime / 2);
+                        : getSecondHtlcLockTime(selectedOffer, getNetwork());
 
                       const targetChain = isInitiator
                         ? (isBtcBacking ? 'main' : 'bip110')

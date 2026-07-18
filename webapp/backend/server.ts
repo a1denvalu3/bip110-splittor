@@ -6,6 +6,8 @@ import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
 import { ExplorerChain, ExplorerRequestError, MempoolExplorerClient } from './explorer';
 import { assertCoordinatorFee, loadCoordinatorFeeConfig } from './coordinatorFees';
+import { randomUUID } from 'crypto';
+import { logError, logInfo, logWarn } from './logger';
 
 import { runMigrations } from './database/migrations';
 import {
@@ -28,6 +30,30 @@ const COORDINATOR_FEES = loadCoordinatorFeeConfig();
 
 app.use(cors());
 app.use(express.json());
+
+// One concise access-log record per request. Bodies, signatures, raw transactions,
+// addresses, and authorization headers are intentionally excluded.
+app.use((req: Request, res: Response, next: any) => {
+    const requestId = req.header('x-request-id') || randomUUID();
+    const startedAt = process.hrtime.bigint();
+    res.setHeader('x-request-id', requestId);
+    res.locals.requestId = requestId;
+    res.on('finish', () => {
+        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+        const fields = {
+            requestId,
+            method: req.method,
+            path: req.path,
+            status: res.statusCode,
+            durationMs: Number(durationMs.toFixed(1))
+        };
+        if (res.statusCode >= 500) logError('http.request', fields);
+        else if (res.statusCode >= 400) logWarn('http.request', fields);
+        else if (req.method !== 'GET' && req.path !== '/api/wallet/utxos') logInfo('http.request', fields);
+        else if (process.env.LOG_HTTP_READS === 'true') logInfo('http.request', fields);
+    });
+    next();
+});
 
 // In-memory rate-limiter database and middleware
 const rateLimitDb: Record<string, { count: number; resetTime: number }> = {};
@@ -100,7 +126,7 @@ function getMainnetExplorer(chain: ExplorerChain): MempoolExplorerClient {
 
 function sendExplorerError(res: Response, error: unknown, operation: string) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[EXPLORER] ${operation}: ${message}`);
+    logError('explorer.error', { requestId: res.locals.requestId, operation, error: message });
     return res.status(502).json({
         error: `Explorer unavailable during ${operation}`,
         detail: message
@@ -214,6 +240,27 @@ const bip110WatchRpc = new BitcoinRpc(18444, 'watchonly');
 // General root RPC clients for wallet management commands
 const mainRootRpc = new BitcoinRpc(18443);
 const bip110RootRpc = new BitcoinRpc(18444);
+
+async function mineRegtestBlocks(rpc: BitcoinRpc, blocks: number): Promise<string[]> {
+    const minerAddress = await rpc.call('getnewaddress');
+    return rpc.call('generatetoaddress', [blocks, minerAddress]);
+}
+
+// Never advance the lower-work BIP110 simulation without advancing Core first.
+// This mirrors the expected production ordering and prevents Knots from becoming
+// the longer chain during refund fast-forwards.
+async function mineRegtestChain(chain: 'main' | 'bip110', blocks: number): Promise<{
+    coreHashes: string[];
+    bip110Hashes: string[];
+}> {
+    if (chain === 'main') {
+        return { coreHashes: await mineRegtestBlocks(mainMinerRpc, blocks), bip110Hashes: [] };
+    }
+
+    const coreHashes = await mineRegtestBlocks(mainMinerRpc, blocks);
+    const bip110Hashes = await mineRegtestBlocks(bip110MinerRpc, blocks);
+    return { coreHashes, bip110Hashes };
+}
 
 // Initialize dual wallets and P2P connection on startup
 async function initNodeWallets() {
@@ -424,6 +471,8 @@ app.post('/api/offers', async (req: Request, res: Response) => {
             backingChain: backingChain || null
         });
 
+        logInfo('offer.created', { requestId: res.locals.requestId, id, networkMode: NETWORK_MODE, backingChain: backingChain || null });
+
         const newOffer = await getOfferById(id);
         res.status(201).json({
             ...newOffer,
@@ -439,6 +488,7 @@ app.post('/api/offers', async (req: Request, res: Response) => {
             acceptorClaimed: newOffer?.acceptorClaimed === 1
         });
     } catch (err: any) {
+        logError('offer.create_failed', { requestId: res.locals.requestId, error: err.message });
         res.status(500).json({ error: "Failed to store offer in database: " + err.message });
     }
 });
@@ -462,6 +512,7 @@ app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
         }
 
         await acceptOfferById(id, acceptorPubKey);
+        logInfo('offer.accepted', { requestId: res.locals.requestId, id });
 
         const updated = await getOfferById(id);
         res.json({
@@ -478,6 +529,7 @@ app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
             acceptorClaimed: updated?.acceptorClaimed === 1
         });
     } catch (err: any) {
+        logError('offer.accept_failed', { requestId: res.locals.requestId, id, error: err.message });
         res.status(500).json({ error: "Database error during acceptance: " + err.message });
     }
 });
@@ -564,6 +616,9 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
         if (fields.status === 'FUNDED_ACCEPTOR' && signer !== 'acceptor') {
             return res.status(400).json({ error: 'Only the acceptor can complete acceptor funding' });
         }
+        if (fields.status === 'REFUNDED' && signer === 'acceptor' && offer.status !== 'FUNDED_ACCEPTOR') {
+            return res.status(400).json({ error: 'The acceptor cannot refund before funding their HTLC' });
+        }
         if (fundingTxid !== undefined) {
             if (typeof fundingTxid !== 'string' || !/^[0-9a-f]{64}$/i.test(fundingTxid)) {
                 return res.status(400).json({ error: 'Invalid HTLC funding transaction id' });
@@ -580,13 +635,37 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
                     : COORDINATOR_FEES.takerFeePercent;
                 const network = NETWORK_MODE === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
                 assertCoordinatorFee(rawTransaction, BigInt(amount), percent, COORDINATOR_FEES.receiveAddress, network);
+                logInfo('coordinator_fee.verified', {
+                    requestId: res.locals.requestId,
+                    id,
+                    signer,
+                    chain: fundingChain,
+                    txid: fundingTxid,
+                    percent
+                });
             } catch (feeErr: any) {
+                logWarn('coordinator_fee.rejected', {
+                    requestId: res.locals.requestId,
+                    id,
+                    signer,
+                    chain: fundingChain,
+                    txid: fundingTxid,
+                    error: feeErr.message
+                });
                 return res.status(400).json({ error: `Invalid coordinator fee: ${feeErr.message}` });
             }
         }
 
         // 5. Update database fields cleanly
         await updateOfferFieldsById(id, fields);
+        logInfo('offer.updated', {
+            requestId: res.locals.requestId,
+            id,
+            signer,
+            previousStatus: offer.status,
+            status: fields.status ?? offer.status,
+            changedFields: Object.keys(fields).sort()
+        });
 
         const updatedOffer = await getOfferById(id);
         res.json({
@@ -594,6 +673,7 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
             acceptorClaimed: updatedOffer?.acceptorClaimed === 1
         });
     } catch (err: any) {
+        logError('offer.update_failed', { requestId: res.locals.requestId, id, error: err.message });
         res.status(500).json({ error: "Database error during verified update: " + err.message });
     }
 });
@@ -641,9 +721,10 @@ app.post('/api/offers/:id/delete', async (req: Request, res: Response) => {
 
         // Signature is valid. Delete from SQLite database
         await deleteOfferById(id);
-        console.log(`[DELETE] Deleted offer #${id} successfully.`);
+        logInfo('offer.deleted', { requestId: res.locals.requestId, id });
         res.json({ success: true, message: `Offer #${id} deleted successfully.` });
     } catch (err: any) {
+        logError('offer.delete_failed', { requestId: res.locals.requestId, id, error: err.message });
         res.status(500).json({ error: "Database error during deletion: " + err.message });
     }
 });
@@ -689,13 +770,14 @@ app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
         }
 
         await walkbackAcceptanceById(id);
-        console.log(`[ABORT] Acceptor left unfunded offer #${id}. Reset to OPEN.`);
+        logInfo('offer.walked_back', { requestId: res.locals.requestId, id, status: 'OPEN' });
         return res.json({
             success: true,
             status: 'OPEN',
             message: `Swap #${id} aborted before funding. The offer is OPEN again.`
         });
     } catch (err: any) {
+        logError('offer.walkback_failed', { requestId: res.locals.requestId, id, error: err.message });
         res.status(500).json({ error: "Database error during walkback: " + err.message });
     }
 });
@@ -733,9 +815,18 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
                 internal: false,
                 label: 'split-contract'
             }]]);
-            console.log(`Successfully imported watch-only descriptor to watchonly wallet: ${info.descriptor}`);
         } catch (err: any) {
-            // If importdescriptors fails or is already imported, ignore
+            // Concurrent frontend scans commonly collide with an active descriptor
+            // rescan. It is harmless because listunspent still runs immediately after.
+            const expectedContention = err.message.includes('currently rescanning')
+                || err.message.includes('already exists');
+            if (!expectedContention) {
+                logWarn('wallet.descriptor_import_skipped', {
+                    requestId: res.locals.requestId,
+                    chain,
+                    error: err.message
+                });
+            }
         }
 
         // Query listunspent from our watchonly wallet
@@ -749,6 +840,7 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
 
         res.json({ address, chain, utxos });
     } catch (err: any) {
+        logError('wallet.utxo_lookup_failed', { requestId: res.locals.requestId, chain, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
@@ -762,6 +854,9 @@ app.post('/api/regtest/faucet', async (req: Request, res: Response) => {
     if (!address || !amountSats || !chain) {
         return res.status(400).json({ error: "Missing address, amountSats, or chain" });
     }
+    if (chain !== 'main' && chain !== 'bip110') {
+        return res.status(400).json({ error: "Invalid chain. Must be 'main' or 'bip110'" });
+    }
 
     // Spend from the private key enabled Miner wallet
     const minerRpc = chain === 'main' ? mainMinerRpc : bip110MinerRpc;
@@ -770,13 +865,15 @@ app.post('/api/regtest/faucet', async (req: Request, res: Response) => {
     try {
         const txid = await minerRpc.call('sendtoaddress', [address, amountBtc]);
         
-        // Mine block using Miner wallet to secure and propagate
-        const minerAddress = await minerRpc.call('getnewaddress');
-        await minerRpc.call('generatetoaddress', [1, minerAddress]);
+        // A Knots confirmation always advances Core first to preserve chain ordering.
+        await mineRegtestChain(chain, 1);
         await new Promise(resolve => setTimeout(resolve, 500));
+
+        logInfo('regtest.faucet', { requestId: res.locals.requestId, chain, amountSats: Number(amountSats), txid });
 
         res.json({ txid, success: true, message: `Deposited ${amountBtc} BTC to ${address} and mined 1 block.` });
     } catch (err: any) {
+        logError('regtest.faucet_failed', { requestId: res.locals.requestId, chain, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
@@ -787,16 +884,30 @@ app.post('/api/regtest/mine', async (req: Request, res: Response) => {
         return res.status(403).json({ error: "Regtest endpoints are disabled in Production Mainnet mode." });
     }
     const { chain, blocks } = req.body;
-    const minerRpc = chain === 'main' ? mainMinerRpc : bip110MinerRpc;
-    const numBlocks = Number(blocks) || 1;
+    if (chain !== 'main' && chain !== 'bip110') {
+        return res.status(400).json({ error: "Invalid chain. Must be 'main' or 'bip110'" });
+    }
+    const numBlocks = Number(blocks ?? 1);
+    if (!Number.isSafeInteger(numBlocks) || numBlocks < 1 || numBlocks > 10_000) {
+        return res.status(400).json({ error: 'blocks must be an integer between 1 and 10000' });
+    }
 
     try {
-        const minerAddress = await minerRpc.call('getnewaddress');
-        const hashes = await minerRpc.call('generatetoaddress', [numBlocks, minerAddress]);
+        const { coreHashes, bip110Hashes } = await mineRegtestChain(chain, numBlocks);
+        const hashes = chain === 'main' ? coreHashes : bip110Hashes;
 
-        res.json({ success: true, hashes });
+        logInfo('regtest.blocks_mined', {
+            requestId: res.locals.requestId,
+            requestedChain: chain,
+            coreBlocks: coreHashes.length,
+            bip110Blocks: bip110Hashes.length,
+            coreTip: coreHashes.at(-1),
+            bip110Tip: bip110Hashes.at(-1)
+        });
+
+        res.json({ success: true, hashes, coreHashes, bip110Hashes });
     } catch (err: any) {
-        console.error("Mining endpoint error:", err.message);
+        logError('regtest.mining_failed', { requestId: res.locals.requestId, chain, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
@@ -815,6 +926,7 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
     if (mode === 'mainnet') {
         try {
             const txid = await getMainnetExplorer(chain).broadcastTransaction(hex);
+            logInfo('transaction.broadcast', { requestId: res.locals.requestId, chain, networkMode: mode, txid });
             return res.json({ success: true, txid });
         } catch (err: any) {
             return sendExplorerError(res, err, `${chain} transaction broadcast`);
@@ -827,8 +939,16 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
     try {
         const txid = await minerRpc.call('sendrawtransaction', [hex]);
 
+        logInfo('transaction.broadcast', { requestId: res.locals.requestId, chain, networkMode: mode, txid });
+
         res.json({ success: true, txid });
     } catch (err: any) {
+        logWarn('transaction.broadcast_rejected', {
+            requestId: res.locals.requestId,
+            chain,
+            networkMode: mode,
+            error: err.message
+        });
         res.status(400).json({ error: err.message });
     }
 });
@@ -859,6 +979,7 @@ app.get('/api/node/info', async (req: Request, res: Response) => {
             bip110Height
         });
     } catch (err: any) {
+        logError('node.info_failed', { requestId: res.locals.requestId, error: err.message });
         res.json({
             mainHeight: 0,
             bip110Height: 0,
