@@ -890,6 +890,21 @@ app.post('/api/offers/:id/walkback', async (req: Request, res: Response) => {
     }
 });
 
+// Read-only raw transaction relay. Clients decode and validate this themselves;
+// the coordinator's offer-state validation is deliberately not the only check.
+app.get('/api/tx/raw', async (req: Request, res: Response) => {
+    const txid = String(req.query.txid || '');
+    const chain = req.query.chain as ExplorerChain;
+    if (!/^[0-9a-f]{64}$/i.test(txid) || (chain !== 'main' && chain !== 'bip110')) {
+        return res.status(400).json({ error: 'A valid txid and chain are required' });
+    }
+    try {
+        return res.json({ txid, chain, hex: await getRawTransaction(txid, chain) });
+    } catch (error) {
+        return sendExplorerError(res, error, `${chain} raw transaction lookup`);
+    }
+});
+
 // 5. Wallet Balance and UTXOs tracking (supports Mempool.space for Mainnet, and custom nodes for BIP110)
 app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
     const { address, chain } = req.body; 

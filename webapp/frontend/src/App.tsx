@@ -340,6 +340,49 @@ export default function App() {
     return match;
   };
 
+  const verifyFundingOnClient = async (offer: Offer, chain: 'main' | 'bip110'): Promise<UTXO> => {
+    if (!offer.acceptorPubKey || !offer.backingChain) throw new Error('Offer contract is incomplete.');
+    const firstHtlc = chain === offer.backingChain;
+    const address = chain === 'main' ? offer.btcHtlcAddress : offer.b110HtlcAddress;
+    const txid = chain === 'main' ? offer.btcHtlcTxid : offer.b110HtlcTxid;
+    const vout = chain === 'main' ? offer.btcHtlcVout : offer.b110HtlcVout;
+    const amount = chain === 'main' ? offer.acceptorBtcAmount : offer.initiatorB110Amount;
+    const recipient = Buffer.from(firstHtlc ? offer.acceptorPubKey : offer.initiatorPubKey, 'hex');
+    const refund = Buffer.from(firstHtlc ? offer.initiatorPubKey : offer.acceptorPubKey, 'hex');
+    const deadline = firstHtlc ? offer.lockTime : offer.secondLockTime;
+    if (!address || !txid || vout === undefined || !deadline) throw new Error('The committed HTLC funding data is incomplete.');
+
+    const validContract = PureBitcoinSwap.verifyTaprootHtlcAddress(
+      address, Buffer.from(offer.initiatorPubKey, 'hex'), Buffer.from(offer.hashLock, 'hex'),
+      recipient, refund, deadline, getNetwork()
+    );
+    if (!validContract) throw new Error('The committed HTLC address does not match the independently reconstructed contract.');
+
+    const rawRes = await axios.get(`${API_BASE}/tx/raw`, { params: { txid, chain } });
+    const transaction = bitcoin.Transaction.fromHex(rawRes.data.hex);
+    if (transaction.getId().toLowerCase() !== txid.toLowerCase()) throw new Error('Raw funding transaction ID does not match the committed transaction ID.');
+    if (!Number.isSafeInteger(vout) || vout < 0 || vout >= transaction.outs.length) throw new Error('Committed HTLC output index is invalid.');
+    const output = transaction.outs[vout];
+    const expectedScript = bitcoin.address.toOutputScript(address, getNetwork());
+    if (!Buffer.from(output.script).equals(expectedScript) || output.value !== BigInt(amount)) {
+      throw new Error('Committed funding output does not contain the exact HTLC script and agreed amount.');
+    }
+
+    const utxoRes = await axios.post(`${API_BASE}/wallet/utxos`, { address, chain, networkMode });
+    const utxo = requireFundingUtxo(offer, chain, utxoRes.data.utxos);
+    if (utxo.confirmations < 1) throw new Error('The committed HTLC funding output is not yet confirmed.');
+    return utxo;
+  };
+
+  const assertConstructedFundingOutput = (transaction: bitcoin.Transaction, address: string, amount: bigint): number => {
+    const expectedScript = bitcoin.address.toOutputScript(address, getNetwork());
+    const matches = transaction.outs
+      .map((output, index) => ({ output, index }))
+      .filter(({ output }) => Buffer.from(output.script).equals(expectedScript) && output.value === amount);
+    if (matches.length !== 1) throw new Error('Locally built transaction does not contain exactly one agreed HTLC output.');
+    return matches[0].index;
+  };
+
   // Helper to get total Main-Chain unsplit balance
   const getMainUnsplitBalance = (): number => {
     return getUnsplitUtxosForChain('main')
@@ -501,12 +544,7 @@ export default function App() {
 
         showToast(`Locating funded UTXO on ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC address...`, 'info');
 
-        const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: targetAddress,
-          chain: targetChain,
-          networkMode
-        });
-        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
+        const utxo = await verifyFundingOnClient(selectedOffer, targetChain);
 
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
         
@@ -573,12 +611,7 @@ export default function App() {
 
         showToast(`Locating funded UTXO on ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC address...`, 'info');
 
-        const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: targetAddress,
-          chain: targetChain,
-          networkMode
-        });
-        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
+        const utxo = await verifyFundingOnClient(selectedOffer, targetChain);
 
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
         
@@ -1873,6 +1906,7 @@ export default function App() {
           coordinatorFees.receiveAddress,
           coordinatorFee
         );
+        const htlcVout = assertConstructedFundingOutput(tx, htlc.address!, targetSats);
 
         // 4. Broadcast via server
         const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
@@ -1888,11 +1922,11 @@ export default function App() {
         if (isBtcBacking) {
           updateParams.btcHtlcAddress = htlc.address!;
           updateParams.btcHtlcTxid = broadcastRes.data.txid;
-          updateParams.btcHtlcVout = 0;
+          updateParams.btcHtlcVout = htlcVout;
         } else {
           updateParams.b110HtlcAddress = htlc.address!;
           updateParams.b110HtlcTxid = broadcastRes.data.txid;
-          updateParams.b110HtlcVout = 0;
+          updateParams.b110HtlcVout = htlcVout;
         }
 
         const updateRes = await secureUpdateOffer(selectedOffer.id, updateParams, 'initiator');
@@ -1931,11 +1965,7 @@ export default function App() {
         }
 
         const firstChain: 'main' | 'bip110' = isBtcBacking ? 'main' : 'bip110';
-        const firstUtxos = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: firstHtlcAddress, chain: firstChain, networkMode
-        });
-        const verifiedFirstFunding = requireFundingUtxo(selectedOffer, firstChain, firstUtxos.data.utxos);
-        if (verifiedFirstFunding.confirmations < 1) throw new Error('The initiator HTLC must be confirmed before acceptor funding.');
+        await verifyFundingOnClient(selectedOffer, firstChain);
 
         showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
 
@@ -1983,6 +2013,7 @@ export default function App() {
           coordinatorFees.receiveAddress,
           coordinatorFee
         );
+        const htlcVout = assertConstructedFundingOutput(tx, htlc.address!, targetSats);
 
         // 4. Broadcast via server
         const broadcastRes = await axios.post(`${API_BASE}/tx/broadcast`, {
@@ -1998,11 +2029,11 @@ export default function App() {
         if (targetChain === 'main') {
           updateParams.btcHtlcAddress = htlc.address!;
           updateParams.btcHtlcTxid = broadcastRes.data.txid;
-          updateParams.btcHtlcVout = 0;
+          updateParams.btcHtlcVout = htlcVout;
         } else {
           updateParams.b110HtlcAddress = htlc.address!;
           updateParams.b110HtlcTxid = broadcastRes.data.txid;
-          updateParams.b110HtlcVout = 0;
+          updateParams.b110HtlcVout = htlcVout;
         }
 
         const updateRes = await secureUpdateOffer(selectedOffer.id, updateParams, 'acceptor');
@@ -2040,12 +2071,7 @@ export default function App() {
 
         showToast(`Signing ${targetChain === 'main' ? 'BTC' : 'B110'} Claim transaction with local preimage...`, 'info');
 
-        const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: targetAddress,
-          chain: targetChain,
-          networkMode
-        });
-        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
+        const utxo = await verifyFundingOnClient(selectedOffer, targetChain);
 
         // Verification of the amount funded inside the HTLC
         const requiredAmount = isBtcBacking ? selectedOffer.initiatorB110Amount : selectedOffer.acceptorBtcAmount;
@@ -2131,12 +2157,7 @@ export default function App() {
 
         showToast(`Signing ${targetChain === 'main' ? 'BTC' : 'B110'} Claim transaction with extracted preimage...`, 'info');
 
-        const htlcUtxosRes = await axios.post(`${API_BASE}/wallet/utxos`, {
-          address: targetAddress,
-          chain: targetChain,
-          networkMode
-        });
-        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
+        const utxo = await verifyFundingOnClient(selectedOffer, targetChain);
 
         // Build and sign claim transaction locally!
         const keyPair = getKeyPairForPubKey(Buffer.from(firstHtlcRecipient).toString('hex'), net);
