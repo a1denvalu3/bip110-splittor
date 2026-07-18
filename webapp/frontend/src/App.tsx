@@ -2457,6 +2457,51 @@ export default function App() {
         {/* TAB 1: WALLET / DEPOSIT */}
         {activeTab === 'wallet' && (
           <div className="space-y-8">
+            {/* Primary funding destination: deliberately first and visually dominant. */}
+            <section className="relative overflow-hidden rounded-2xl border border-emerald-500/35 bg-slate-950 shadow-2xl shadow-emerald-950/20">
+              <div className="absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b from-emerald-300 via-sky-400 to-indigo-500" />
+              <div className="p-5 sm:p-7 pl-7 sm:pl-9">
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="max-w-2xl">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">
+                        Deposit destination
+                      </span>
+                      <span className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        {networkMode === 'mainnet' ? 'Bitcoin Mainnet' : 'Regtest'} · P2TR
+                      </span>
+                    </div>
+                    <h2 className="text-xl font-bold tracking-tight text-white sm:text-2xl">
+                      Send funds to this address
+                    </h2>
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400 sm:text-sm">
+                      This is your unified deposit address. Initial unsplit coins must arrive here before they can be separated into Bitcoin and BIP110 balances.
+                    </p>
+                  </div>
+
+                  <div className="shrink-0 rounded-xl border border-sky-500/20 bg-sky-950/20 px-4 py-3 text-xs text-sky-200 lg:max-w-xs">
+                    <span className="block font-bold">Same address on both fork chains</span>
+                    <span className="mt-1 block text-[11px] leading-relaxed text-slate-400">Do not use the later “split destination” as your initial deposit address.</span>
+                  </div>
+                </div>
+
+                <div className="mt-6 rounded-xl border border-emerald-500/25 bg-black/35 p-3 sm:flex sm:items-center sm:gap-3 sm:p-4">
+                  <code className="block min-w-0 flex-1 break-all font-mono text-sm font-semibold leading-relaxed text-emerald-200 sm:text-base">
+                    {splitAddress || 'Computing your deposit address…'}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(splitAddress)}
+                    disabled={!splitAddress}
+                    className="mt-3 inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 py-2.5 text-xs font-black uppercase tracking-wider text-slate-950 transition-colors hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40 sm:mt-0 sm:w-auto"
+                  >
+                    <Copy className="h-4 w-4" />
+                    Copy deposit address
+                  </button>
+                </div>
+              </div>
+            </section>
+
             {/* Keypair Card */}
             <div className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-6 shadow-xl backdrop-blur-sm grid grid-cols-1 md:grid-cols-2 gap-8">
               <div>
@@ -2507,12 +2552,12 @@ export default function App() {
                     disabled={loadingKeys}
                     className="w-full sm:w-auto px-4 py-2 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white transition-all self-start"
                   >
-                    Generate New P2TR Address
+                    Generate New Deposit Address
                   </button>
 
                   {maxIndex > 0 && (
                     <div className="mt-2 pt-4 border-t border-slate-800/80">
-                      <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Switch Active P2TR Address</label>
+                      <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">Switch Deposit Address</label>
                       <select
                         value={activeIndex}
                         onChange={(e) => loadWalletFromHistory(Number(e.target.value))}
@@ -2538,10 +2583,10 @@ export default function App() {
                 <div>
                   <h4 className="text-sm font-semibold text-slate-200 mb-1 flex items-center gap-2">
                     <Unlock className="w-4 h-4 text-sky-400" />
-                    Derived P2TR Split Address
+                    Deposit Contract Details
                   </h4>
                   <p className="text-xs text-slate-400 mb-4">
-                    Dual-spend behavior: Scriptpath on Bitcoin, Keypath on BIP110.
+                    Technical details for the deposit address highlighted above. Scriptpath on Bitcoin, keypath on BIP110.
                   </p>
 
                   <div className="bg-slate-950 border border-slate-800 px-3 py-2.5 rounded-xl flex items-center justify-between font-mono text-xs text-sky-300 mb-4">
@@ -2703,7 +2748,7 @@ export default function App() {
               {networkMode === 'regtest' ? (
                 <>
                   <p className="text-xs text-slate-400 mb-6">
-                    Fund your local regtest environment and deposit simulated coins into your P2TR split contract address.
+                    Fund your local regtest environment and send simulated coins to the deposit address shown at the top of this page.
                   </p>
 
                   <div className="space-y-6">
@@ -2721,10 +2766,10 @@ export default function App() {
                       </button>
                     </div>
 
-                    {/* Step 2: Pay P2TR Split Address */}
+                    {/* Step 2: Fund deposit address */}
                     <div className="bg-slate-950 p-4 rounded-xl border border-slate-850">
-                      <h4 className="text-xs font-bold text-slate-200 mb-1">Step 2: Pay unified P2TR Split Address</h4>
-                      <p className="text-[10px] text-slate-400 mb-4">Transfer simulated coins from the mature miner wallet directly into your unified P2TR split contract address (mines 1 block to confirm).</p>
+                      <h4 className="text-xs font-bold text-slate-200 mb-1">Step 2: Fund Your Deposit Address</h4>
+                      <p className="text-[10px] text-slate-400 mb-4">Send simulated coins from the miner wallet to your deposit address. The faucet mines one block to confirm the deposit.</p>
                       
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
                         <div>
@@ -2771,19 +2816,19 @@ export default function App() {
               ) : (
                 <>
                   <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                    Send real BTC/BIP110 funds directly to your **Unified P2TR Split Address** shown above.
+                    Send real BTC or BIP110 funds to the clearly marked <strong className="text-slate-200">Deposit Destination</strong> at the top of this page.
                   </p>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs mt-4">
                     <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
                       <h4 className="font-semibold text-slate-200 mb-1.5">For Bitcoin Mainnet</h4>
-                      <p className="text-slate-400 mb-3">Send BTC to your P2TR address. Track confirmations using any major mainnet block explorer.</p>
+                      <p className="text-slate-400 mb-3">Send BTC to the deposit address shown above. Track confirmations using a Bitcoin block explorer.</p>
                       <a href={`https://mempool.space/address/${splitAddress}`} target="_blank" rel="noreferrer" className="text-amber-400 hover:underline flex items-center gap-1 font-semibold">
                         View on Mempool.space <ExternalLink className="w-3 h-3" />
                       </a>
                     </div>
                     <div className="bg-slate-950/50 p-4 rounded-xl border border-slate-850">
                       <h4 className="font-semibold text-slate-200 mb-1.5">For BIP110-Chain</h4>
-                      <p className="text-slate-400 mb-3">Send your fork assets to the same P2TR address. Ensure transaction settles.</p>
+                      <p className="text-slate-400 mb-3">Send BIP110 assets to the same deposit address shown above and wait for confirmation.</p>
                       <span className="text-slate-500 flex items-center gap-1 font-medium">
                         Requires BIP110 Wallet connection
                       </span>
