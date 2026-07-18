@@ -8,6 +8,7 @@ import { ExplorerChain, ExplorerRequestError, MempoolExplorerClient } from './ex
 import { assertCoordinatorFee, loadCoordinatorFeeConfig } from './coordinatorFees';
 import { randomUUID } from 'crypto';
 import { logError, logInfo, logWarn } from './logger';
+import { PureBitcoinSwap } from '../../src/lib/PureBitcoinSwap';
 
 import { runMigrations } from './database/migrations';
 import {
@@ -355,6 +356,25 @@ async function getRawTransaction(txid: string, chain: ExplorerChain): Promise<st
     return rpc.call('getrawtransaction', [txid, false]);
 }
 
+async function assertConfirmedChainExclusiveOutpoint(txid: string, vout: number, chain: ExplorerChain): Promise<void> {
+    if (await getTxConfirmations(txid, chain, NETWORK_MODE) < 1) throw new Error(`Transaction ${txid} is not confirmed on ${chain}`);
+    const opposite: ExplorerChain = chain === 'main' ? 'bip110' : 'main';
+    let oppositeHasOutpoint = false;
+    if (NETWORK_MODE === 'regtest') {
+        const rpc = opposite === 'bip110' ? bip110MinerRpc : mainMinerRpc;
+        oppositeHasOutpoint = (await rpc.call('gettxout', [txid, vout, true])) !== null;
+    } else {
+        const raw = await getRawTransaction(txid, chain);
+        const transaction = bitcoin.Transaction.fromHex(raw);
+        if (!Number.isSafeInteger(vout) || vout < 0 || vout >= transaction.outs.length) throw new Error('Invalid split output index');
+        const network = bitcoin.networks.bitcoin;
+        const address = bitcoin.address.fromOutputScript(transaction.outs[vout].script, network);
+        const oppositeUtxos = await getMainnetExplorer(opposite).getAddressUtxos(address);
+        oppositeHasOutpoint = oppositeUtxos.some(output => output.txid === txid && output.vout === vout);
+    }
+    if (oppositeHasOutpoint) throw new Error(`Outpoint ${txid}:${vout} is still unspent on ${opposite} and is replayable`);
+}
+
 function fundingChainFor(offer: Offer, signer: 'initiator' | 'acceptor'): ExplorerChain {
     if (!offer.backingChain) throw new Error('Offer has no backing chain');
     if (signer === 'initiator') return offer.backingChain;
@@ -449,11 +469,29 @@ app.get('/api/offers', async (req: Request, res: Response) => {
 
 // 2. Create a Marketplace Offer
 app.post('/api/offers', async (req: Request, res: Response) => {
-    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, backingTxid, backingVout, backingChain } = req.body;
+    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, secondLockTime, backingTxid, backingVout, backingChain } = req.body;
 
-    if (!initiatorPubKey || !initiatorB110Amount || !acceptorBtcAmount || !hashLock || !lockTime) {
+    if (!initiatorPubKey || !initiatorB110Amount || !acceptorBtcAmount || !hashLock || !lockTime || !secondLockTime) {
         return res.status(400).json({ error: "Missing required parameters" });
     }
+
+    const b110Amount = Number(initiatorB110Amount);
+    const btcAmount = Number(acceptorBtcAmount);
+    const firstDeadline = Number(lockTime);
+    const secondDeadline = Number(secondLockTime);
+    if (!/^(02|03)[0-9a-f]{64}$/i.test(initiatorPubKey) || !/^[0-9a-f]{64}$/i.test(hashLock)) {
+        return res.status(400).json({ error: 'Invalid initiator public key or hash lock' });
+    }
+    if (![b110Amount, btcAmount, firstDeadline, secondDeadline].every(Number.isSafeInteger)
+        || b110Amount <= 0 || btcAmount <= 0 || secondDeadline <= 0 || firstDeadline <= secondDeadline) {
+        return res.status(400).json({ error: 'Amounts and deadlines must be positive safe integers, with the initiator deadline after the acceptor deadline' });
+    }
+    if (!/^[0-9a-f]{64}$/i.test(backingTxid || '') || !Number.isSafeInteger(Number(backingVout)) || Number(backingVout) < 0
+        || (backingChain !== 'main' && backingChain !== 'bip110')) {
+        return res.status(400).json({ error: 'A valid confirmed split backing outpoint and chain are required' });
+    }
+    try { await assertConfirmedChainExclusiveOutpoint(backingTxid, Number(backingVout), backingChain); }
+    catch (error: any) { return res.status(400).json({ error: `Unsafe backing transaction: ${error.message}` }); }
 
     const id = Math.random().toString(36).substring(2, 11);
 
@@ -461,10 +499,11 @@ app.post('/api/offers', async (req: Request, res: Response) => {
         await insertOffer({
             id,
             initiatorPubKey,
-            initiatorB110Amount: Number(initiatorB110Amount),
-            acceptorBtcAmount: Number(acceptorBtcAmount),
+            initiatorB110Amount: b110Amount,
+            acceptorBtcAmount: btcAmount,
             hashLock,
-            lockTime: Number(lockTime),
+            lockTime: firstDeadline,
+            secondLockTime: secondDeadline,
             networkMode: NETWORK_MODE,
             backingTxid: backingTxid || null,
             backingVout: backingVout !== undefined ? Number(backingVout) : null,
@@ -496,10 +535,10 @@ app.post('/api/offers', async (req: Request, res: Response) => {
 // 3. Accept a Marketplace Offer
 app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
     const id = req.params.id as string;
-    const { acceptorPubKey } = req.body;
+    const { acceptorPubKey, signature } = req.body;
 
-    if (!acceptorPubKey) {
-        return res.status(400).json({ error: "Missing acceptorPubKey" });
+    if (!acceptorPubKey || !signature || !/^(02|03)[0-9a-f]{64}$/i.test(acceptorPubKey) || !/^[0-9a-f]{128,144}$/i.test(signature)) {
+        return res.status(400).json({ error: "A valid acceptorPubKey and signature are required" });
     }
 
     try {
@@ -511,7 +550,13 @@ app.post('/api/offers/:id/accept', async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Offer is not in OPEN status" });
         }
 
-        await acceptOfferById(id, acceptorPubKey);
+        const messageHash = bitcoin.crypto.sha256(Buffer.from(`accept-offer:${id}:${acceptorPubKey}`));
+        const verified = ECPair.fromPublicKey(Buffer.from(acceptorPubKey, 'hex'))
+            .verify(messageHash, Buffer.from(signature, 'hex'));
+        if (!verified) return res.status(401).json({ error: 'Invalid acceptance signature' });
+        if (!await acceptOfferById(id, acceptorPubKey)) {
+            return res.status(409).json({ error: 'Offer was already accepted by another participant' });
+        }
         logInfo('offer.accepted', { requestId: res.locals.requestId, id });
 
         const updated = await getOfferById(id);
@@ -599,16 +644,55 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
             return res.status(401).json({ error: "Signature verification failed: " + sigErr.message });
         }
 
+        // Authorization is transition-specific: a valid participant signature must not
+        // permit mutation of fields owned by the other role or unrelated contract state.
+        const chain = fundingChainFor(offer, signer);
+        const chainFields = chain === 'main'
+            ? ['status', 'btcHtlcAddress', 'btcHtlcTxid', 'btcHtlcVout']
+            : ['status', 'b110HtlcAddress', 'b110HtlcTxid', 'b110HtlcVout'];
+        let permitted: string[] = [];
+        if (signer === 'initiator' && offer.status === 'ACCEPTED' && fields.status === 'FUNDED_INITIATOR') permitted = chainFields;
+        else if (signer === 'acceptor' && offer.status === 'FUNDED_INITIATOR' && fields.status === 'FUNDED_ACCEPTOR') permitted = chainFields;
+        else if (signer === 'initiator' && offer.status === 'FUNDED_ACCEPTOR' && fields.status === 'CLAIMED') permitted = ['status', 'preimage', 'initiatorSettlementTxid'];
+        else if (signer === 'acceptor' && offer.status === 'CLAIMED' && fields.acceptorClaimed === true) permitted = ['status', 'acceptorClaimed', 'acceptorSettlementTxid'];
+        else if (fields.status === 'REFUNDED' && ((signer === 'initiator' && ['FUNDED_INITIATOR', 'FUNDED_ACCEPTOR'].includes(offer.status))
+            || (signer === 'acceptor' && offer.status === 'FUNDED_ACCEPTOR'))) permitted = ['status', signer === 'initiator' ? 'initiatorSettlementTxid' : 'acceptorSettlementTxid'];
+        const submitted = Object.keys(fields);
+        if (permitted.length === 0 || submitted.some(key => !permitted.includes(key))) {
+            return res.status(403).json({ error: `Fields are not authorized for ${signer} in state ${offer.status}` });
+        }
+
+        const isSettlement = fields.status === 'CLAIMED' || fields.status === 'REFUNDED' || fields.acceptorClaimed === true;
+        if (isSettlement) {
+            const settlementTxid = signer === 'initiator' ? fields.initiatorSettlementTxid : fields.acceptorSettlementTxid;
+            if (typeof settlementTxid !== 'string' || !/^[0-9a-f]{64}$/i.test(settlementTxid)) {
+                return res.status(400).json({ error: 'Terminal state requires the on-chain settlement transaction id' });
+            }
+            if (fields.preimage !== undefined && (!/^[0-9a-f]{64}$/i.test(fields.preimage)
+                || !bitcoin.crypto.sha256(Buffer.from(fields.preimage, 'hex')).equals(Buffer.from(offer.hashLock, 'hex')))) {
+                return res.status(400).json({ error: 'Claim preimage does not satisfy the committed hash lock' });
+            }
+            const spendsFirst = (signer === 'initiator' && fields.status === 'REFUNDED') || (signer === 'acceptor' && fields.acceptorClaimed === true);
+            const escrowChain: ExplorerChain = spendsFirst ? offer.backingChain! : (offer.backingChain === 'main' ? 'bip110' : 'main');
+            const escrowTxid = escrowChain === 'main' ? offer.btcHtlcTxid : offer.b110HtlcTxid;
+            const escrowVout = escrowChain === 'main' ? offer.btcHtlcVout : offer.b110HtlcVout;
+            const settlement = bitcoin.Transaction.fromHex(await getRawTransaction(settlementTxid, escrowChain));
+            const spendsCommittedOutpoint = settlement.ins.some(input => Buffer.from(input.hash).reverse().toString('hex') === escrowTxid && input.index === escrowVout);
+            if (!spendsCommittedOutpoint) return res.status(400).json({ error: 'Settlement transaction does not spend the committed HTLC outpoint' });
+        }
+
         // 4. Funding updates must pay the configured role fee in the actual on-chain transaction.
         const fundingChain = fundingChainFor(offer, signer);
         const fundingTxid = fundingChain === 'main' ? fields.btcHtlcTxid : fields.b110HtlcTxid;
         const otherFundingTxid = fundingChain === 'main' ? fields.b110HtlcTxid : fields.btcHtlcTxid;
         const expectedFundingStatus = signer === 'initiator' ? 'FUNDED_INITIATOR' : 'FUNDED_ACCEPTOR';
+        const fundingVout = fundingChain === 'main' ? fields.btcHtlcVout : fields.b110HtlcVout;
+        const fundingAddress = fundingChain === 'main' ? fields.btcHtlcAddress : fields.b110HtlcAddress;
         if (otherFundingTxid !== undefined) {
             return res.status(400).json({ error: `${signer} cannot register a funding transaction for the other swap chain` });
         }
-        if (fields.status === expectedFundingStatus && fundingTxid === undefined) {
-            return res.status(400).json({ error: `${expectedFundingStatus} requires the ${fundingChain} HTLC funding transaction id` });
+        if (fields.status === expectedFundingStatus && (fundingTxid === undefined || fundingVout === undefined || fundingAddress === undefined)) {
+            return res.status(400).json({ error: `${expectedFundingStatus} requires the exact HTLC funding address and outpoint` });
         }
         if (fields.status === 'FUNDED_INITIATOR' && signer !== 'initiator') {
             return res.status(400).json({ error: 'Only the initiator can complete initiator funding' });
@@ -629,11 +713,35 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
                 if (transaction.getId().toLowerCase() !== fundingTxid.toLowerCase()) {
                     return res.status(400).json({ error: 'HTLC funding transaction id does not match transaction data' });
                 }
+                for (const input of transaction.ins) {
+                    const previousTxid = Buffer.from(input.hash).reverse().toString('hex');
+                    await assertConfirmedChainExclusiveOutpoint(previousTxid, input.index, fundingChain);
+                }
                 const amount = fundingChain === 'main' ? offer.acceptorBtcAmount : offer.initiatorB110Amount;
+                if (!Number.isSafeInteger(fundingVout) || fundingVout < 0 || fundingVout >= transaction.outs.length) {
+                    return res.status(400).json({ error: 'Invalid HTLC funding output index' });
+                }
                 const percent = signer === 'initiator'
                     ? COORDINATOR_FEES.makerFeePercent
                     : COORDINATOR_FEES.takerFeePercent;
                 const network = NETWORK_MODE === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
+                const isFirstHtlc = signer === 'initiator';
+                const recipient = Buffer.from(isFirstHtlc ? offer.acceptorPubKey! : offer.initiatorPubKey, 'hex');
+                const refund = Buffer.from(isFirstHtlc ? offer.initiatorPubKey : offer.acceptorPubKey!, 'hex');
+                const deadline = isFirstHtlc ? offer.lockTime : offer.secondLockTime;
+                if (!deadline) return res.status(400).json({ error: 'Offer is missing its committed HTLC deadline' });
+                const expectedAddress = PureBitcoinSwap.createTaprootHtlc(
+                    Buffer.from(offer.initiatorPubKey, 'hex'), Buffer.from(offer.hashLock, 'hex'),
+                    recipient, refund, deadline, network
+                ).address;
+                if (fundingAddress !== expectedAddress) {
+                    return res.status(400).json({ error: 'Funding address does not match the committed HTLC contract' });
+                }
+                const expectedScript = bitcoin.address.toOutputScript(fundingAddress, network);
+                const output = transaction.outs[fundingVout];
+                if (!output.script.equals(expectedScript) || output.value !== BigInt(amount)) {
+                    return res.status(400).json({ error: 'Funding outpoint does not contain the exact agreed HTLC script and amount' });
+                }
                 assertCoordinatorFee(rawTransaction, BigInt(amount), percent, COORDINATOR_FEES.receiveAddress, network);
                 logInfo('coordinator_fee.verified', {
                     requestId: res.locals.requestId,

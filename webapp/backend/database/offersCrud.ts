@@ -9,10 +9,15 @@ export interface DbOffer {
     acceptorBtcAmount: number;
     hashLock: string;
     lockTime: number;
+    secondLockTime?: number | null;
     b110HtlcAddress?: string | null;
     btcHtlcAddress?: string | null;
     b110HtlcTxid?: string | null;
     btcHtlcTxid?: string | null;
+    b110HtlcVout?: number | null;
+    btcHtlcVout?: number | null;
+    initiatorSettlementTxid?: string | null;
+    acceptorSettlementTxid?: string | null;
     preimage?: string | null;
     networkMode: 'mainnet' | 'regtest';
     createdAt: number;
@@ -114,6 +119,7 @@ export async function insertOffer(offer: {
     acceptorBtcAmount: number;
     hashLock: string;
     lockTime: number;
+    secondLockTime: number;
     networkMode: 'mainnet' | 'regtest';
     backingTxid?: string | null;
     backingVout?: number | null;
@@ -123,22 +129,23 @@ export async function insertOffer(offer: {
     await dbRun(`
         INSERT INTO offers (
             id, status, initiatorPubKey, initiatorB110Amount, acceptorPubKey, acceptorBtcAmount,
-            hashLock, lockTime, b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid,
-            preimage, networkMode, createdAt, backingTxid, backingVout, backingChain, acceptorClaimed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            hashLock, lockTime, secondLockTime, b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid, b110HtlcVout, btcHtlcVout,
+            initiatorSettlementTxid, acceptorSettlementTxid, preimage, networkMode, createdAt, backingTxid, backingVout, backingChain, acceptorClaimed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `, [
         offer.id, 'OPEN', offer.initiatorPubKey, offer.initiatorB110Amount, null, offer.acceptorBtcAmount,
-        offer.hashLock, offer.lockTime, null, null, null, null,
-        null, offer.networkMode, createdAt, offer.backingTxid || null, 
+        offer.hashLock, offer.lockTime, offer.secondLockTime, null, null, null, null, null, null,
+        null, null, null, offer.networkMode, createdAt, offer.backingTxid || null,
         offer.backingVout !== undefined ? offer.backingVout : null, offer.backingChain || null
     ]);
 }
 
-export async function acceptOfferById(id: string, acceptorPubKey: string): Promise<void> {
-    await dbRun(
-        "UPDATE offers SET acceptorPubKey = ?, status = 'ACCEPTED' WHERE id = ?",
+export async function acceptOfferById(id: string, acceptorPubKey: string): Promise<boolean> {
+    const result = await dbRun(
+        "UPDATE offers SET acceptorPubKey = ?, status = 'ACCEPTED' WHERE id = ? AND status = 'OPEN'",
         [acceptorPubKey, id]
     );
+    return result.changes === 1;
 }
 
 export async function updateOfferFieldsById(id: string, fields: Partial<DbOffer>): Promise<void> {
@@ -147,7 +154,8 @@ export async function updateOfferFieldsById(id: string, fields: Partial<DbOffer>
 
     const allowedKeys: (keyof DbOffer)[] = [
         'status', 'acceptorPubKey', 'b110HtlcAddress', 'btcHtlcAddress',
-        'b110HtlcTxid', 'btcHtlcTxid', 'preimage', 'acceptorClaimed'
+        'b110HtlcTxid', 'btcHtlcTxid', 'b110HtlcVout', 'btcHtlcVout', 'initiatorSettlementTxid',
+        'acceptorSettlementTxid', 'preimage', 'acceptorClaimed'
     ];
 
     for (const key of allowedKeys) {

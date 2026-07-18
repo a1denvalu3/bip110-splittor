@@ -253,4 +253,24 @@ describe('Pure Bitcoinjs-Lib Optimized Swap Tests', () => {
         expect(tx.outs.map(output => output.value)).to.deep.equal([180000n, 2500n, 7500n]);
         expect(Buffer.from(tx.outs[1].script).equals(bitcoin.address.toOutputScript(coordinator, bitcoin.networks.regtest))).to.equal(true);
     });
+
+    it('8. Funding fails closed instead of silently underfunding the HTLC', () => {
+        const keyPair = PureBitcoinSwap.generateKeyPair();
+        const pubKey = Buffer.from(keyPair.publicKey);
+        const payment = bitcoin.payments.p2tr({ internalPubkey: PureBitcoinSwap.getXOnlyPubKey(pubKey), network: bitcoin.networks.regtest });
+        const input = { txid: '44'.repeat(32), vout: 0, amount: 100000n, keyPair, merkleRoot: Buffer.alloc(0), paymentOutput: payment.output! };
+        expect(() => PureBitcoinSwap.buildMultiInputHtlcFundingTx(
+            [input], 100000n, payment.address!, undefined, 5000n
+        )).to.throw('Insufficient input');
+    });
+
+    it('9. Funding refuses to burn positive change when no change address is supplied', () => {
+        const keyPair = PureBitcoinSwap.generateKeyPair();
+        const pubKey = Buffer.from(keyPair.publicKey);
+        const payment = bitcoin.payments.p2tr({ internalPubkey: PureBitcoinSwap.getXOnlyPubKey(pubKey), network: bitcoin.networks.regtest });
+        const input = { txid: '55'.repeat(32), vout: 0, amount: 120000n, keyPair, merkleRoot: Buffer.alloc(0), paymentOutput: payment.output! };
+        expect(() => PureBitcoinSwap.buildMultiInputHtlcFundingTx(
+            [input], 100000n, payment.address!, undefined, 5000n
+        )).to.throw('change address');
+    });
 });

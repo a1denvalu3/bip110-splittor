@@ -122,10 +122,15 @@ interface Offer {
   acceptorBtcAmount: number;
   hashLock: string;
   lockTime: number;
+  secondLockTime: number;
   b110HtlcAddress?: string;
   btcHtlcAddress?: string;
   b110HtlcTxid?: string;
   btcHtlcTxid?: string;
+  b110HtlcVout?: number;
+  btcHtlcVout?: number;
+  initiatorSettlementTxid?: string;
+  acceptorSettlementTxid?: string;
   preimage?: string;
   networkMode: 'mainnet' | 'regtest';
   createdAt: number;
@@ -255,7 +260,7 @@ export default function App() {
   };
 
   const getSecondHtlcLockTime = (offer: Offer, network: bitcoin.Network): number => {
-    const intendedLockTime = Math.round(offer.lockTime / 2);
+    const intendedLockTime = offer.secondLockTime;
     const secondHtlcAddress = offer.backingChain === 'main' ? offer.b110HtlcAddress : offer.btcHtlcAddress;
     if (!secondHtlcAddress || !offer.acceptorPubKey) return intendedLockTime;
 
@@ -270,16 +275,12 @@ export default function App() {
     if (PureBitcoinSwap.verifyTaprootHtlcAddress(...commonArgs, intendedLockTime, network)) {
       return intendedLockTime;
     }
-    // Compatibility for swaps funded before the acceptor HTLC correctly used T/2.
-    if (PureBitcoinSwap.verifyTaprootHtlcAddress(...commonArgs, offer.lockTime, network)) {
-      return offer.lockTime;
-    }
-    throw new Error('The acceptor HTLC address does not match either the expected T/2 contract or the legacy T contract.');
+    throw new Error('The acceptor HTLC address does not match its committed second deadline.');
   };
 
   const formatLockTimeDisplay = (lockTime: number, isHalf: boolean = false, backingChain: 'main' | 'bip110' = 'main') => {
     const currentHeight = backingChain === 'main' ? nodeInfo.mainHeight : nodeInfo.bip110Height;
-    const targetHeight = isHalf ? Math.round(lockTime / 2) : lockTime;
+    const targetHeight = isHalf ? lockTime : lockTime;
     
     if (currentHeight <= 0) {
       return `Block #${targetHeight}`;
@@ -326,7 +327,17 @@ export default function App() {
 
   const getSplitUtxosForChain = (chain: 'main' | 'bip110'): UTXO[] => {
     const candidates = chain === 'main' ? allMainUtxos : allBip110Utxos;
-    return uniqueUtxos(candidates).filter(isUtxoSplit);
+    return uniqueUtxos(candidates).filter(u => u.confirmations >= 1 && isUtxoSplit(u));
+  };
+
+  const requireFundingUtxo = (offer: Offer, chain: 'main' | 'bip110', utxos: UTXO[]): UTXO => {
+    const txid = chain === 'main' ? offer.btcHtlcTxid : offer.b110HtlcTxid;
+    const vout = chain === 'main' ? offer.btcHtlcVout : offer.b110HtlcVout;
+    const amount = chain === 'main' ? offer.acceptorBtcAmount : offer.initiatorB110Amount;
+    if (!txid || vout === undefined) throw new Error('The server has not committed an exact HTLC funding outpoint.');
+    const match = utxos.find(u => u.txid === txid && u.vout === vout);
+    if (!match || match.amount !== amount) throw new Error('The committed HTLC funding outpoint is missing or has the wrong amount.');
+    return match;
   };
 
   // Helper to get total Main-Chain unsplit balance
@@ -495,8 +506,7 @@ export default function App() {
           chain: targetChain,
           networkMode
         });
-        const utxo = htlcUtxosRes.data.utxos[0];
-        if (!utxo) throw new Error("No funded UTXO found on your HTLC contract. Has it already been claimed or refunded?");
+        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
 
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
         
@@ -533,7 +543,7 @@ export default function App() {
         );
 
         // Broadcast raw tx
-        await axios.post(`${API_BASE}/tx/broadcast`, {
+        const settlementRes = await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
@@ -542,7 +552,8 @@ export default function App() {
         // Update Offer State on server
         const role = selectedOffer.initiatorPubKey === publicKey ? 'initiator' : 'acceptor';
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
-          status: 'REFUNDED'
+          status: 'REFUNDED',
+          initiatorSettlementTxid: settlementRes.data.txid
         }, role);
 
         setSelectedOffer(updateRes.data);
@@ -567,8 +578,7 @@ export default function App() {
           chain: targetChain,
           networkMode
         });
-        const utxo = htlcUtxosRes.data.utxos[0];
-        if (!utxo) throw new Error("No funded UTXO found on your HTLC contract. Has it already been claimed or refunded?");
+        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
 
         showToast("Signing Refund transaction using Taproot MAST RefundLeaf...", 'info');
         
@@ -605,7 +615,7 @@ export default function App() {
         );
 
         // Broadcast raw tx
-        await axios.post(`${API_BASE}/tx/broadcast`, {
+        const settlementRes = await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
@@ -614,7 +624,8 @@ export default function App() {
         // Update Offer State on server
         const role = selectedOffer.initiatorPubKey === publicKey ? 'initiator' : 'acceptor';
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
-          status: 'REFUNDED'
+          status: 'REFUNDED',
+          acceptorSettlementTxid: settlementRes.data.txid
         }, role);
 
         setSelectedOffer(updateRes.data);
@@ -966,13 +977,13 @@ export default function App() {
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
     const net = getNetwork();
 
-    let masterPriv = localStorage.getItem(`${keyPrefix}_master_privkey`);
+    let masterPriv = sessionStorage.getItem(`${keyPrefix}_master_privkey`);
     let activeIdx = parseInt(localStorage.getItem(`${keyPrefix}_active_index`) || '0', 10);
     let maxIdx = parseInt(localStorage.getItem(`${keyPrefix}_max_index`) || '0', 10);
 
     if (!masterPriv) {
       // Migrate pre-existing non-master private key to master if exists, or generate a fresh one
-      const oldPriv = localStorage.getItem(`${keyPrefix}_bip110_privkey`);
+      const oldPriv = localStorage.getItem(`${keyPrefix}_master_privkey`) || localStorage.getItem(`${keyPrefix}_bip110_privkey`);
       if (oldPriv) {
         masterPriv = oldPriv;
       } else {
@@ -981,10 +992,13 @@ export default function App() {
       }
       activeIdx = 0;
       maxIdx = 0;
-      localStorage.setItem(`${keyPrefix}_master_privkey`, masterPriv);
+      sessionStorage.setItem(`${keyPrefix}_master_privkey`, masterPriv);
       localStorage.setItem(`${keyPrefix}_active_index`, '0');
       localStorage.setItem(`${keyPrefix}_max_index`, '0');
     }
+    // Remove legacy persistent plaintext secrets after one-time migration.
+    localStorage.removeItem(`${keyPrefix}_master_privkey`);
+    localStorage.removeItem(`${keyPrefix}_bip110_privkey`);
 
     setMasterPrivateKey(masterPriv);
     setActiveIndex(activeIdx);
@@ -1044,8 +1058,10 @@ export default function App() {
     setTimeout(() => setToast(null), 5000);
   };
 
-  const handleDownloadRecoveryFile = () => {
+  const handleDownloadRecoveryFile = async () => {
     try {
+      const password = window.prompt('Choose a strong password to encrypt this recovery file:');
+      if (!password || password.length < 12) throw new Error('Recovery password must be at least 12 characters.');
       const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
       const recoveryData = {
         app: 'bip110-splittoooor',
@@ -1056,7 +1072,13 @@ export default function App() {
         instructions: "Upload this file to the BIP110 Splittoooor application to instantly restore your Master Private Key and derived addresses."
       };
 
-      const jsonStr = JSON.stringify(recoveryData, null, 2);
+      const salt = window.crypto.getRandomValues(new Uint8Array(16));
+      const iv = window.crypto.getRandomValues(new Uint8Array(12));
+      const material = await window.crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+      const key = await window.crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+      const ciphertext = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(recoveryData)));
+      const toBase64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+      const jsonStr = JSON.stringify({ app: 'bip110-splittoooor-encrypted', version: 1, kdf: 'PBKDF2-SHA256', iterations: 310000, salt: toBase64(salt), iv: toBase64(iv), ciphertext: toBase64(new Uint8Array(ciphertext)) }, null, 2);
       const blob = new Blob([jsonStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       
@@ -1083,10 +1105,19 @@ export default function App() {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const text = e.target?.result as string;
-        const data = JSON.parse(text);
+        let data = JSON.parse(text);
+        if (data.app === 'bip110-splittoooor-encrypted') {
+          const password = window.prompt('Enter the recovery-file password:');
+          if (!password) throw new Error('A password is required.');
+          const fromBase64 = (value: string) => Uint8Array.from(atob(value), c => c.charCodeAt(0));
+          const material = await window.crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+          const key = await window.crypto.subtle.deriveKey({ name: 'PBKDF2', salt: fromBase64(data.salt), iterations: data.iterations, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+          const plaintext = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(data.iv) }, key, fromBase64(data.ciphertext));
+          data = JSON.parse(new TextDecoder().decode(plaintext));
+        }
 
         if (data.app !== 'bip110-splittoooor' || !data.masterPrivateKey) {
           showToast('Invalid recovery file format. Please upload a valid BIP110 Splittoooor recovery file.', 'error');
@@ -1113,7 +1144,7 @@ export default function App() {
         setActiveIndex(activeIdx);
         setMaxIndex(maxIdx);
 
-        localStorage.setItem(`${keyPrefix}_master_privkey`, masterPriv);
+        sessionStorage.setItem(`${keyPrefix}_master_privkey`, masterPriv);
         localStorage.setItem(`${keyPrefix}_active_index`, String(activeIdx));
         localStorage.setItem(`${keyPrefix}_max_index`, String(maxIdx));
 
@@ -1159,7 +1190,7 @@ export default function App() {
       localStorage.setItem(`${keyPrefix}_active_index`, String(newMaxIndex));
       localStorage.setItem(`${keyPrefix}_max_index`, String(newMaxIndex));
 
-      localStorage.setItem(`${keyPrefix}_bip110_privkey`, activeKeys.privateKey);
+      sessionStorage.setItem(`${keyPrefix}_bip110_privkey`, activeKeys.privateKey);
       localStorage.setItem(`${keyPrefix}_bip110_pubkey`, activeKeys.publicKey);
       localStorage.setItem(`${keyPrefix}_bip110_address`, activeKeys.splitAddress);
       
@@ -1187,7 +1218,7 @@ export default function App() {
 
     localStorage.setItem(`${keyPrefix}_active_index`, String(index));
 
-    localStorage.setItem(`${keyPrefix}_bip110_privkey`, activeKeys.privateKey);
+    sessionStorage.setItem(`${keyPrefix}_bip110_privkey`, activeKeys.privateKey);
     localStorage.setItem(`${keyPrefix}_bip110_pubkey`, activeKeys.publicKey);
     localStorage.setItem(`${keyPrefix}_bip110_address`, activeKeys.splitAddress);
 
@@ -1695,10 +1726,15 @@ export default function App() {
       const hashLockHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 
       const baseHeight = backingChain === 'main' ? nodeInfo.mainHeight : nodeInfo.bip110Height;
+      const secondBaseHeight = backingChain === 'main' ? nodeInfo.bip110Height : nodeInfo.mainHeight;
       if (!baseHeight || baseHeight <= 0) {
         throw new Error(`Cannot determine current block height for ${backingChain === 'main' ? 'Bitcoin' : 'BIP110'} chain. Please wait for node info to sync.`);
       }
-      const absoluteLockTime = baseHeight + Number(newOfferLocktime);
+      if (!secondBaseHeight || secondBaseHeight <= 0) throw new Error('Cannot determine the counter-chain height.');
+      const duration = Number(newOfferLocktime);
+      if (!Number.isSafeInteger(duration) || duration < 2) throw new Error('Lock duration must be at least two blocks.');
+      const absoluteLockTime = baseHeight + duration;
+      const secondLockTime = secondBaseHeight + Math.floor(duration / 2);
 
       const res = await axios.post(`${API_BASE}/offers`, {
         initiatorPubKey: publicKey,
@@ -1706,6 +1742,7 @@ export default function App() {
         acceptorBtcAmount: Number(newOfferBtc),
         hashLock: hashLockHex,
         lockTime: absoluteLockTime,
+        secondLockTime,
         networkMode,
         backingTxid,
         backingVout,
@@ -1713,7 +1750,7 @@ export default function App() {
       });
 
       // Save preimage locally associated with Offer ID so we can claim later
-      localStorage.setItem(`preimage_${res.data.id}`, preimageHex);
+      sessionStorage.setItem(`preimage_${res.data.id}`, preimageHex);
 
       showToast('Swap offer published successfully to the marketplace!', 'success');
       setSelectedBackingUtxoKey('');
@@ -1748,8 +1785,12 @@ export default function App() {
       if (!fundingSelection) {
         throw new Error(`insufficient split ${targetChain === 'main' ? 'BTC' : 'BIP110'} balance for the contract, coordinator fee, and network fee`);
       }
+      const acceptMessage = `accept-offer:${offer.id}:${publicKey}`;
+      const acceptPair = ECPair.fromPrivateKey(Buffer.from(privateKey, 'hex'));
+      const signature = Buffer.from(acceptPair.sign(bitcoin.crypto.sha256(Buffer.from(acceptMessage)))).toString('hex');
       const res = await axios.post(`${API_BASE}/offers/${offer.id}/accept`, {
-        acceptorPubKey: publicKey
+        acceptorPubKey: publicKey,
+        signature
       });
       showToast('Offer accepted! Launching the Swap Wizard...', 'success');
       setSelectedOffer(res.data);
@@ -1847,9 +1888,11 @@ export default function App() {
         if (isBtcBacking) {
           updateParams.btcHtlcAddress = htlc.address!;
           updateParams.btcHtlcTxid = broadcastRes.data.txid;
+          updateParams.btcHtlcVout = 0;
         } else {
           updateParams.b110HtlcAddress = htlc.address!;
           updateParams.b110HtlcTxid = broadcastRes.data.txid;
+          updateParams.b110HtlcVout = 0;
         }
 
         const updateRes = await secureUpdateOffer(selectedOffer.id, updateParams, 'initiator');
@@ -1887,12 +1930,19 @@ export default function App() {
           throw new Error(`CRITICAL SECURITY WARNING: The initiator's ${isBtcBacking ? 'BTC' : 'BIP110'} HTLC address is INVALID or has been tampered with!`);
         }
 
+        const firstChain: 'main' | 'bip110' = isBtcBacking ? 'main' : 'bip110';
+        const firstUtxos = await axios.post(`${API_BASE}/wallet/utxos`, {
+          address: firstHtlcAddress, chain: firstChain, networkMode
+        });
+        const verifiedFirstFunding = requireFundingUtxo(selectedOffer, firstChain, firstUtxos.data.utxos);
+        if (verifiedFirstFunding.confirmations < 1) throw new Error('The initiator HTLC must be confirmed before acceptor funding.');
+
         showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
 
         // 1. Generate second HTLC outputs locally
         const secondHtlcRecipient = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
         const secondHtlcRefund = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
-        const secondHtlcLockTime = Math.round(selectedOffer.lockTime / 2);
+        const secondHtlcLockTime = selectedOffer.secondLockTime;
 
         const htlc = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
@@ -1948,9 +1998,11 @@ export default function App() {
         if (targetChain === 'main') {
           updateParams.btcHtlcAddress = htlc.address!;
           updateParams.btcHtlcTxid = broadcastRes.data.txid;
+          updateParams.btcHtlcVout = 0;
         } else {
           updateParams.b110HtlcAddress = htlc.address!;
           updateParams.b110HtlcTxid = broadcastRes.data.txid;
+          updateParams.b110HtlcVout = 0;
         }
 
         const updateRes = await secureUpdateOffer(selectedOffer.id, updateParams, 'acceptor');
@@ -1970,6 +2022,7 @@ export default function App() {
         // Security check: Verify that the acceptor's HTLC address matches the expected script
         const secondHtlcRecipient = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
         const secondHtlcRefund = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
+        const secondHtlcLockTime = getSecondHtlcLockTime(selectedOffer, net);
 
         const isSecondHtlcValid = PureBitcoinSwap.verifyTaprootHtlcAddress(
           targetAddress,
@@ -1977,7 +2030,7 @@ export default function App() {
           Buffer.from(selectedOffer.hashLock, 'hex'),
           secondHtlcRecipient,
           secondHtlcRefund,
-          selectedOffer.lockTime,
+          secondHtlcLockTime,
           net
         );
 
@@ -1992,8 +2045,7 @@ export default function App() {
           chain: targetChain,
           networkMode
         });
-        const utxo = htlcUtxosRes.data.utxos[0];
-        if (!utxo) throw new Error(`Could not find the funded UTXO on the ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC. If on regtest, mine a block.`);
+        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
 
         // Verification of the amount funded inside the HTLC
         const requiredAmount = isBtcBacking ? selectedOffer.initiatorB110Amount : selectedOffer.acceptorBtcAmount;
@@ -2002,12 +2054,11 @@ export default function App() {
         }
 
         // Retrieve local preimage securely stored
-        const savedPreimage = localStorage.getItem(`preimage_${selectedOffer.id}`);
+        const savedPreimage = sessionStorage.getItem(`preimage_${selectedOffer.id}`);
         if (!savedPreimage) throw new Error("Cryptographic preimage not found in secure local storage.");
 
         // Build and sign claim transaction locally!
         const keyPair = getKeyPairForPubKey(selectedOffer.initiatorPubKey, net);
-        const secondHtlcLockTime = getSecondHtlcLockTime(selectedOffer, net);
         const htlcPayment = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
           Buffer.from(selectedOffer.hashLock, 'hex'),
@@ -2035,7 +2086,7 @@ export default function App() {
         );
 
         // Broadcast raw tx
-        await axios.post(`${API_BASE}/tx/broadcast`, {
+        const settlementRes = await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
@@ -2044,7 +2095,8 @@ export default function App() {
         // Update Offer State on server
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
           preimage: savedPreimage,
-          status: 'CLAIMED'
+          status: 'CLAIMED',
+          initiatorSettlementTxid: settlementRes.data.txid
         }, 'initiator');
 
         setSelectedOffer(updateRes.data);
@@ -2084,8 +2136,7 @@ export default function App() {
           chain: targetChain,
           networkMode
         });
-        const utxo = htlcUtxosRes.data.utxos[0];
-        if (!utxo) throw new Error(`Could not find funded UTXO on ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC address.`);
+        const utxo = requireFundingUtxo(selectedOffer, targetChain, htlcUtxosRes.data.utxos);
 
         // Build and sign claim transaction locally!
         const keyPair = getKeyPairForPubKey(Buffer.from(firstHtlcRecipient).toString('hex'), net);
@@ -2115,7 +2166,7 @@ export default function App() {
           net
         );
 
-        await axios.post(`${API_BASE}/tx/broadcast`, {
+        const settlementRes = await axios.post(`${API_BASE}/tx/broadcast`, {
           hex: tx.toHex(),
           chain: targetChain,
           networkMode
@@ -2123,7 +2174,8 @@ export default function App() {
 
         const updateRes = await secureUpdateOffer(selectedOffer.id, {
           status: 'CLAIMED',
-          acceptorClaimed: true
+          acceptorClaimed: true,
+          acceptorSettlementTxid: settlementRes.data.txid
         }, 'acceptor');
 
         setSelectedOffer(updateRes.data);
@@ -3651,7 +3703,7 @@ export default function App() {
                           <div className="flex justify-between">
                             <span className="text-slate-500 font-medium">Refund Locktime (T/2):</span>
                             <span className="font-semibold text-amber-500">
-                              {formatLockTimeDisplay(o.lockTime, true, o.backingChain || 'main')}
+                              {formatLockTimeDisplay(o.secondLockTime, false, o.backingChain === 'main' ? 'bip110' : 'main')}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -3733,7 +3785,7 @@ export default function App() {
                     <div className="bg-slate-950 border border-slate-850 px-4 py-2.5 rounded-xl text-center">
                       <span className="text-[10px] text-slate-500 uppercase block font-semibold">Refund Height (T / T/2)</span>
                       <span className="text-sm font-bold text-amber-500">
-                        #{selectedOffer.lockTime} / #{Math.round(selectedOffer.lockTime / 2)}
+                        #{selectedOffer.lockTime} / #{selectedOffer.secondLockTime}
                       </span>
                     </div>
                   </div>

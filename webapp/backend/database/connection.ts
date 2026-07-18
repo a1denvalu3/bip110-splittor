@@ -15,11 +15,12 @@ export const db = new sqlite3.Database(dbPath, (err) => {
     }
 });
 
-export const dbRun = (sql: string, params: any[] = []): Promise<void> => {
+export interface DbRunResult { changes: number; lastID: number }
+export const dbRun = (sql: string, params: any[] = []): Promise<DbRunResult> => {
     return new Promise((resolve, reject) => {
         db.run(sql, params, function (err) {
             if (err) reject(err);
-            else resolve();
+            else resolve({ changes: this.changes, lastID: this.lastID });
         });
     });
 };

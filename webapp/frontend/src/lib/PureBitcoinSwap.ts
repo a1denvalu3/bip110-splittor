@@ -248,15 +248,10 @@ export class PureBitcoinSwap {
         tx.version = 2;
         tx.addInput(Buffer.from(splitTxid, 'hex').reverse(), outputIndex);
         
-        let finalOutputSats = outputSats;
-        let changeSats = inputSats - finalOutputSats - feeSats;
-
-        if (changeSats < 0n) {
-            // No change output can be created, so we must reduce the HTLC funding output amount
-            // to pay the minimum transaction fee from the input!
-            finalOutputSats = inputSats - feeSats;
-            changeSats = 0n;
-        }
+        const finalOutputSats = outputSats;
+        const changeSats = inputSats - finalOutputSats - feeSats;
+        if (finalOutputSats <= 0n || feeSats < 0n || changeSats < 0n) throw new Error('Insufficient input for the exact HTLC amount and fee');
+        if (changeSats > 0n && !changeAddr) throw new Error('A change address is required; refusing to donate change as miner fee');
 
         // 1. Add HTLC contract output
         tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), finalOutputSats);
@@ -308,13 +303,10 @@ export class PureBitcoinSwap {
         }
 
         const totalInputSats = inputs.reduce((sum, input) => sum + input.amount, 0n);
-        let finalOutputSats = outputSats;
-        let changeSats = totalInputSats - finalOutputSats - coordinatorFeeSats - feeSats;
-
-        if (changeSats < 0n) {
-            finalOutputSats = totalInputSats - coordinatorFeeSats - feeSats;
-            changeSats = 0n;
-        }
+        const finalOutputSats = outputSats;
+        const changeSats = totalInputSats - finalOutputSats - coordinatorFeeSats - feeSats;
+        if (inputs.length === 0 || finalOutputSats <= 0n || feeSats < 0n || coordinatorFeeSats < 0n || changeSats < 0n) throw new Error('Insufficient input for exact funding outputs and fees');
+        if (changeSats > 0n && !changeAddr) throw new Error('A change address is required; refusing to donate change as miner fee');
 
         // 1. Add HTLC contract output
         tx.addOutput(bitcoin.address.toOutputScript(htlcAddr, network), finalOutputSats);
@@ -494,14 +486,10 @@ export class PureBitcoinSwap {
         tx.version = 2;
         tx.addInput(Buffer.from(txid, 'hex').reverse(), vout);
 
-        let finalWithdrawSats = withdrawSats;
-        let changeSats = inputSats - finalWithdrawSats - feeSats;
-
-        if (changeSats < 0n) {
-            // Adjust output amount to fit within input minus fee
-            finalWithdrawSats = inputSats - feeSats;
-            changeSats = 0n;
-        }
+        const finalWithdrawSats = withdrawSats;
+        const changeSats = inputSats - finalWithdrawSats - feeSats;
+        if (finalWithdrawSats <= 0n || feeSats < 0n || changeSats < 0n) throw new Error('Insufficient input for the exact withdrawal amount and fee');
+        if (changeSats > 0n && !changeAddress) throw new Error('A change address is required; refusing to donate change as miner fee');
 
         // 1. Add withdrawal output
         tx.addOutput(bitcoin.address.toOutputScript(destAddress, network), finalWithdrawSats);
