@@ -9,6 +9,7 @@ import { assertCoordinatorFee, loadCoordinatorFeeConfig } from './coordinatorFee
 import { randomUUID } from 'crypto';
 import { logError, logInfo, logWarn } from './logger';
 import { PureBitcoinSwap } from '../../src/lib/PureBitcoinSwap';
+import { cachedExplorerRead, closeCache } from './cache';
 
 import { runMigrations } from './database/migrations';
 import {
@@ -28,6 +29,18 @@ const ECPair = ECPairFactory(ecc);
 const app = express();
 const PORT = process.env.PORT || 4000;
 const COORDINATOR_FEES = loadCoordinatorFeeConfig();
+const cacheTtl = (name: string, fallback: number): number => {
+    const value = Number(process.env[name] ?? fallback);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 86400) throw new Error(`${name} must be an integer from 1 to 86400 seconds`);
+    return value;
+};
+const EXPLORER_CACHE_TTL = {
+    tip: cacheTtl('EXPLORER_TIP_CACHE_SECONDS', 10),
+    utxos: cacheTtl('EXPLORER_UTXO_CACHE_SECONDS', 15),
+    confirmations: cacheTtl('EXPLORER_CONFIRMATION_CACHE_SECONDS', 15),
+    rawTransaction: cacheTtl('EXPLORER_RAW_TX_CACHE_SECONDS', 86400),
+    fees: cacheTtl('EXPLORER_FEE_CACHE_SECONDS', 30)
+};
 
 app.use(cors());
 app.use(express.json());
@@ -123,6 +136,22 @@ function getMainnetExplorer(chain: ExplorerChain): MempoolExplorerClient {
         throw new Error('BIP110_EXPLORER_URL is required in mainnet mode');
     }
     return bip110Explorer;
+}
+
+function cachedMainnetRead<T>(
+    chain: ExplorerChain,
+    operation: string,
+    parameters: unknown,
+    ttlSeconds: number,
+    loader: (explorer: MempoolExplorerClient) => Promise<T>
+): Promise<T> {
+    const explorer = getMainnetExplorer(chain);
+    return cachedExplorerRead(operation, {
+        network: NETWORK_MODE,
+        chain,
+        explorer: explorer.baseUrl,
+        parameters
+    }, ttlSeconds, () => loader(explorer));
 }
 
 function sendExplorerError(res: Response, error: unknown, operation: string) {
@@ -338,7 +367,7 @@ async function getTxConfirmations(
 ): Promise<number> {
     if (!txid) return 0;
     if (mode === 'mainnet') {
-        return getMainnetExplorer(chain).getTransactionConfirmations(txid);
+        return cachedMainnetRead(chain, 'confirmations', { txid }, EXPLORER_CACHE_TTL.confirmations, explorer => explorer.getTransactionConfirmations(txid));
     }
     // Regtest
     try {
@@ -351,7 +380,9 @@ async function getTxConfirmations(
 }
 
 async function getRawTransaction(txid: string, chain: ExplorerChain): Promise<string> {
-    if (NETWORK_MODE === 'mainnet') return getMainnetExplorer(chain).getRawTransaction(txid);
+    if (NETWORK_MODE === 'mainnet') {
+        return cachedMainnetRead(chain, 'raw-transaction', { txid }, EXPLORER_CACHE_TTL.rawTransaction, explorer => explorer.getRawTransaction(txid));
+    }
     const rpc = chain === 'bip110' ? bip110MinerRpc : mainMinerRpc;
     return rpc.call('getrawtransaction', [txid, false]);
 }
@@ -369,7 +400,7 @@ async function assertConfirmedChainExclusiveOutpoint(txid: string, vout: number,
         if (!Number.isSafeInteger(vout) || vout < 0 || vout >= transaction.outs.length) throw new Error('Invalid split output index');
         const network = bitcoin.networks.bitcoin;
         const address = bitcoin.address.fromOutputScript(transaction.outs[vout].script, network);
-        const oppositeUtxos = await getMainnetExplorer(opposite).getAddressUtxos(address);
+        const oppositeUtxos = await cachedMainnetRead(opposite, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, explorer => explorer.getAddressUtxos(address));
         oppositeHasOutpoint = oppositeUtxos.some(output => output.txid === txid && output.vout === vout);
     }
     if (oppositeHasOutpoint) throw new Error(`Outpoint ${txid}:${vout} is still unspent on ${opposite} and is replayable`);
@@ -918,7 +949,7 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
 
     if (mode === 'mainnet') {
         try {
-            const utxos = await getMainnetExplorer(chain).getAddressUtxos(address);
+            const utxos = await cachedMainnetRead(chain, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, explorer => explorer.getAddressUtxos(address));
             return res.json({ address, chain, utxos });
         } catch (err: any) {
             return sendExplorerError(res, err, `${chain} UTXO lookup`);
@@ -1080,8 +1111,8 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 app.get('/api/node/info', async (req: Request, res: Response) => {
     if (NETWORK_MODE === 'mainnet') {
         const [mainResult, bip110Result] = await Promise.allSettled([
-            Promise.resolve().then(() => getMainnetExplorer('main').getTipHeight()),
-            Promise.resolve().then(() => getMainnetExplorer('bip110').getTipHeight())
+            Promise.resolve().then(() => cachedMainnetRead('main', 'chain-tip', {}, EXPLORER_CACHE_TTL.tip, explorer => explorer.getTipHeight())),
+            Promise.resolve().then(() => cachedMainnetRead('bip110', 'chain-tip', {}, EXPLORER_CACHE_TTL.tip, explorer => explorer.getTipHeight()))
         ]);
         const mainError = mainResult.status === 'rejected'
             ? (mainResult.reason instanceof Error ? mainResult.reason.message : String(mainResult.reason))
@@ -1144,7 +1175,7 @@ app.get('/api/fees/recommended', async (req: Request, res: Response) => {
     }
 
     try {
-        const fees = await getMainnetExplorer(chain).getRecommendedFees();
+        const fees = await cachedMainnetRead(chain, 'recommended-fees', {}, EXPLORER_CACHE_TTL.fees, explorer => explorer.getRecommendedFees());
         return res.json(fees);
     } catch (err: any) {
         return sendExplorerError(res, err, `${chain} fee estimate`);
@@ -1176,3 +1207,9 @@ startServer().catch((error: any) => {
     console.error(`[BOOT] Fatal startup error: ${error.message}`);
     process.exit(1);
 });
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+        closeCache().catch(() => undefined).finally(() => process.exit(0));
+    });
+}

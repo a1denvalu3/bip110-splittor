@@ -130,12 +130,18 @@ http://localhost:3000
 ## Production Mainnet Explorer Configuration
 
 Mainnet mode fails closed unless both explorers expose a Mempool-compatible API, including chain height, transaction status, address UTXOs, raw transaction broadcast, and recommended fees.
+Explorer reads are shared through Redis so repeated requests from different clients do not repeatedly hit the upstream APIs. `npm run server:mainnet` starts the bundled Redis service automatically.
 
 ```bash
 BITCOIN_EXPLORER_URL=https://mempool.space \
 BIP110_EXPLORER_URL=https://your-bip110-mempool.example \
 npm run server:mainnet
 ```
+
+Use `REDIS_URL` to point at an external Redis instance. Cache lifetimes can be tuned with
+`EXPLORER_TIP_CACHE_SECONDS`, `EXPLORER_UTXO_CACHE_SECONDS`,
+`EXPLORER_CONFIRMATION_CACHE_SECONDS`, `EXPLORER_RAW_TX_CACHE_SECONDS`, and
+`EXPLORER_FEE_CACHE_SECONDS`. Defaults are 10, 15, 15, 86400, and 30 seconds respectively.
 
 Coordinator fees are disabled by default. To require funding transactions from makers (initiators)
 and takers (acceptors) to pay the coordinator, configure percentage values and a receive address:

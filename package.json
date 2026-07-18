@@ -9,7 +9,7 @@
     "test:swap": "npx ts-node tests/regtest-full-swap.ts",
     "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts",
     "server": "docker compose up -d && rm -f webapp/backend/bip110_swap_regtest.db && npx ts-node webapp/backend/server.ts",
-    "server:mainnet": "npx ts-node webapp/backend/server.ts --mainnet",
+    "server:mainnet": "docker compose up -d redis && npx ts-node webapp/backend/server.ts --mainnet",
     "frontend": "npm run dev --prefix webapp/frontend",
     "stop": "docker compose down -v && pkill -f ts-node || true"
   },
@@ -24,6 +24,7 @@
     "cors": "^2.8.6",
     "ecpair": "^3.0.1",
     "express": "^5.2.1",
+    "redis": "^5.12.1",
     "sqlite3": "^6.0.1",
     "tiny-secp256k1": "^2.2.4"
   },
