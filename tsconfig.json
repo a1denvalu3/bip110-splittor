@@ -13,5 +13,5 @@
     "ignoreDeprecations": "6.0",
     "types": ["mocha", "node"]
   },
-  "include": ["src/**/*", "tests/**/*"]
+  "include": ["src/**/*", "tests/**/*", "webapp/backend/**/*"]
 }

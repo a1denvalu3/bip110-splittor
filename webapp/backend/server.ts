@@ -669,7 +669,7 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
                 return res.status(400).json({ error: 'Terminal state requires the on-chain settlement transaction id' });
             }
             if (fields.preimage !== undefined && (!/^[0-9a-f]{64}$/i.test(fields.preimage)
-                || !bitcoin.crypto.sha256(Buffer.from(fields.preimage, 'hex')).equals(Buffer.from(offer.hashLock, 'hex')))) {
+                || !Buffer.from(bitcoin.crypto.sha256(Buffer.from(fields.preimage, 'hex'))).equals(Buffer.from(offer.hashLock, 'hex')))) {
                 return res.status(400).json({ error: 'Claim preimage does not satisfy the committed hash lock' });
             }
             const spendsFirst = (signer === 'initiator' && fields.status === 'REFUNDED') || (signer === 'acceptor' && fields.acceptorClaimed === true);
@@ -739,7 +739,7 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
                 }
                 const expectedScript = bitcoin.address.toOutputScript(fundingAddress, network);
                 const output = transaction.outs[fundingVout];
-                if (!output.script.equals(expectedScript) || output.value !== BigInt(amount)) {
+                if (!Buffer.from(output.script).equals(Buffer.from(expectedScript)) || output.value !== BigInt(amount)) {
                     return res.status(400).json({ error: 'Funding outpoint does not contain the exact agreed HTLC script and amount' });
                 }
                 assertCoordinatorFee(rawTransaction, BigInt(amount), percent, COORDINATOR_FEES.receiveAddress, network);
