@@ -205,7 +205,11 @@ export default function App() {
   const balanceRetryAfterRef = useRef<number>(0);
 
   // Selected UTXO to split
-  const [nodeInfo, setNodeInfo] = useState<{ mainHeight: number; bip110Height: number }>({ mainHeight: 0, bip110Height: 0 });
+  const [nodeInfo, setNodeInfo] = useState<{
+    mainHeight: number;
+    bip110Height: number;
+    errors?: { main?: string; bip110?: string };
+  }>({ mainHeight: 0, bip110Height: 0 });
   const [selectedUtxoToSplit, setSelectedUtxoToSplit] = useState<UTXO | null>(null);
   const [splittingBilateral, setSplittingBilateral] = useState<boolean>(false);
   const [bilateralSplitResult, setBilateralSplitResult] = useState<{
@@ -1261,7 +1265,7 @@ export default function App() {
   const fetchNodeInfo = async () => {
     try {
       const res = await axios.get(`${API_BASE}/node/info`);
-      setNodeInfo({ mainHeight: res.data.mainHeight, bip110Height: res.data.bip110Height });
+      setNodeInfo({ mainHeight: res.data.mainHeight, bip110Height: res.data.bip110Height, errors: res.data.errors });
     } catch (err: any) {
       setNodeInfo({ mainHeight: 0, bip110Height: 0 });
       console.error(err);
@@ -2332,10 +2336,25 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div className="flex items-center gap-1 bg-amber-950/40 border border-amber-900/50 px-3 py-1.5 rounded-xl text-amber-400 font-bold text-xs shadow-sm">
-                <Lock className="w-3.5 h-3.5" />
-                <span className="hidden xs:inline">MAINNET PRODUCTION</span>
-                <span className="xs:hidden">MAINNET</span>
+              <div className="flex items-center gap-3 sm:gap-4">
+                <div className="flex flex-col items-end leading-none">
+                  <span className="text-[10px] sm:text-xs text-slate-400 font-medium">Bitcoin</span>
+                  <span
+                    className={`text-[10px] sm:text-xs font-semibold px-2 py-0.5 rounded-md mt-1 border ${nodeInfo.errors?.main ? 'text-rose-400 bg-rose-950/40 border-rose-900/60' : 'text-emerald-400 bg-emerald-950/40 border-emerald-900/60'}`}
+                    title={nodeInfo.errors?.main}
+                  >
+                    {nodeInfo.errors?.main ? 'Unavailable' : `Block #${nodeInfo.mainHeight}`}
+                  </span>
+                </div>
+                <div className="flex flex-col items-end leading-none border-l border-slate-800 pl-3 sm:pl-4">
+                  <span className="text-[10px] sm:text-xs text-slate-400 font-medium">BIP110</span>
+                  <span
+                    className={`text-[10px] sm:text-xs font-semibold px-2 py-0.5 rounded-md mt-1 border ${nodeInfo.errors?.bip110 ? 'text-rose-400 bg-rose-950/40 border-rose-900/60' : 'text-sky-400 bg-sky-950/40 border-sky-900/60'}`}
+                    title={nodeInfo.errors?.bip110}
+                  >
+                    {nodeInfo.errors?.bip110 ? 'Unavailable' : `Block #${nodeInfo.bip110Height}`}
+                  </span>
+                </div>
               </div>
             )}
 

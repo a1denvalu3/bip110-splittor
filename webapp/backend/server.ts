@@ -1079,18 +1079,26 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 // 9. Node Chain Height Info (Supports both Mainnet and Regtest for real-time safety monitoring)
 app.get('/api/node/info', async (req: Request, res: Response) => {
     if (NETWORK_MODE === 'mainnet') {
-        try {
-            const [mainHeight, bip110Height] = await Promise.all([
-                getMainnetExplorer('main').getTipHeight(),
-                getMainnetExplorer('bip110').getTipHeight()
-            ]);
-            return res.json({
-                mainHeight,
-                bip110Height
-            });
-        } catch (err: any) {
-            return sendExplorerError(res, err, 'chain-tip lookup');
-        }
+        const [mainResult, bip110Result] = await Promise.allSettled([
+            Promise.resolve().then(() => getMainnetExplorer('main').getTipHeight()),
+            Promise.resolve().then(() => getMainnetExplorer('bip110').getTipHeight())
+        ]);
+        const mainError = mainResult.status === 'rejected'
+            ? (mainResult.reason instanceof Error ? mainResult.reason.message : String(mainResult.reason))
+            : undefined;
+        const bip110Error = bip110Result.status === 'rejected'
+            ? (bip110Result.reason instanceof Error ? bip110Result.reason.message : String(bip110Result.reason))
+            : undefined;
+        if (mainError) logWarn('chain_tip.unavailable', { requestId: res.locals.requestId, chain: 'main', error: mainError });
+        if (bip110Error) logWarn('chain_tip.unavailable', { requestId: res.locals.requestId, chain: 'bip110', error: bip110Error });
+        return res.json({
+            mainHeight: mainResult.status === 'fulfilled' ? mainResult.value : 0,
+            bip110Height: bip110Result.status === 'fulfilled' ? bip110Result.value : 0,
+            errors: {
+                ...(mainError ? { main: mainError } : {}),
+                ...(bip110Error ? { bip110: bip110Error } : {})
+            }
+        });
     }
 
     // Regtest Mode
