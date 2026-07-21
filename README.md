@@ -127,10 +127,39 @@ http://localhost:3000
   4. **Tab 4: My Swaps & Offers**: Monitor your listings, delete outstanding listings, walk back acceptances, or accept your own listing as a counterparty (by generating a new active P2TR address in Tab 1!).
   5. **Tab 5: Swap Wizard**: Orchestrate the end-to-end atomic swap using the step-by-step visual workflow to fund escrows, extract revealed preimages, settle claims, or simulate expired refund scripts.
 
-## Production Mainnet Explorer Configuration
+## Production Mainnet Chain Data Configuration
 
-Mainnet mode fails closed unless both explorers expose an Esplora-compatible API, including chain height, transaction status, address UTXOs, and raw transaction broadcast. Recommended fees may be supplied by either Mempool's `/api/v1/fees/recommended` endpoint or Esplora's `/api/fee-estimates` endpoint.
-Explorer reads are shared through Redis so repeated requests from different clients do not repeatedly hit the upstream APIs. `npm run server:mainnet` starts the bundled Redis service automatically.
+Each chain can independently use either an Esplora-compatible HTTP API or a Bitcoin JSON-RPC node. Set the corresponding `*_RPC_HOST` to select RPC; otherwise the explorer URL is used. RPC configuration uses separate host, port, username, and password variables. Only explorer endpoints are configured as URLs.
+
+For example, use mempool.space for Bitcoin and a local Knots/BIP110 RPC node:
+
+```bash
+BITCOIN_EXPLORER_URL=https://mempool.space \
+BIP110_RPC_HOST=127.0.0.1 \
+BIP110_RPC_PORT=8332 \
+BIP110_RPC_USER=splittoooor \
+BIP110_RPC_PASSWORD='replace-me' \
+npm run server:mainnet
+```
+
+Or configure RPC for both chains:
+
+```bash
+BITCOIN_RPC_HOST=127.0.0.1 \
+BITCOIN_RPC_PORT=8332 \
+BITCOIN_RPC_USER=bitcoin \
+BITCOIN_RPC_PASSWORD='replace-me' \
+BIP110_RPC_HOST=127.0.0.1 \
+BIP110_RPC_PORT=8334 \
+BIP110_RPC_USER=bip110 \
+BIP110_RPC_PASSWORD='replace-me' \
+npm run server:mainnet
+```
+
+RPC mode creates and persists a disabled-private-keys wallet named `watchonly`. Addresses are imported when the frontend first scans them, so the backend must see an address before it receives funds. Preserve the node wallet directory across restarts. Raw transaction lookup on a pruned node only works while the relevant block remains available; transactions cached by Redis remain available to the backend for the configured cache lifetime.
+
+Explorer mode requires chain height, transaction status, address UTXOs, and raw transaction broadcast. Recommended fees may be supplied by either Mempool's `/api/v1/fees/recommended` endpoint or Esplora's `/api/fee-estimates` endpoint.
+Reads from either source are shared through Redis so repeated requests from different clients do not repeatedly hit the upstream. `npm run server:mainnet` starts the bundled Redis service automatically.
 
 ```bash
 BITCOIN_EXPLORER_URL=https://mempool.space \

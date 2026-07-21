@@ -120,45 +120,29 @@ console.log(`[BOOT] Coordinator fees: maker=${COORDINATOR_FEES.makerFeePercent}%
 
 const BITCOIN_EXPLORER_URL = (process.env.BITCOIN_EXPLORER_URL || 'https://mempool.space').trim();
 const BIP110_EXPLORER_URL = process.env.BIP110_EXPLORER_URL?.trim() || '';
-const mainnetExplorer = new MempoolExplorerClient(BITCOIN_EXPLORER_URL);
-const bip110Explorer = BIP110_EXPLORER_URL
+const BITCOIN_RPC_HOST = process.env.BITCOIN_RPC_HOST?.trim() || '';
+const BIP110_RPC_HOST = process.env.BIP110_RPC_HOST?.trim() || '';
+const mainnetExplorer = BITCOIN_RPC_HOST ? null : new MempoolExplorerClient(BITCOIN_EXPLORER_URL);
+const bip110Explorer = !BIP110_RPC_HOST && BIP110_EXPLORER_URL
     ? new MempoolExplorerClient(BIP110_EXPLORER_URL)
     : null;
 
 if (NETWORK_MODE === 'mainnet') {
-    console.log(`[BOOT] Bitcoin Mainnet Explorer API URL configured as: [${BITCOIN_EXPLORER_URL}]`);
-    console.log(`[BOOT] BIP110 Mainnet Explorer API URL configured as: [${BIP110_EXPLORER_URL || 'MISSING'}]`);
+    console.log(`[BOOT] Bitcoin Mainnet source: [${BITCOIN_RPC_HOST ? 'RPC' : BITCOIN_EXPLORER_URL}]`);
+    console.log(`[BOOT] BIP110 Mainnet source: [${BIP110_RPC_HOST ? 'RPC' : (BIP110_EXPLORER_URL || 'MISSING')}]`);
 }
 
 function getMainnetExplorer(chain: ExplorerChain): MempoolExplorerClient {
-    if (chain === 'main') return mainnetExplorer;
-    if (!bip110Explorer) {
-        throw new Error('BIP110_EXPLORER_URL is required in mainnet mode');
-    }
-    return bip110Explorer;
-}
-
-function cachedMainnetRead<T>(
-    chain: ExplorerChain,
-    operation: string,
-    parameters: unknown,
-    ttlSeconds: number,
-    loader: (explorer: MempoolExplorerClient) => Promise<T>
-): Promise<T> {
-    const explorer = getMainnetExplorer(chain);
-    return cachedExplorerRead(operation, {
-        network: NETWORK_MODE,
-        chain,
-        explorer: explorer.baseUrl,
-        parameters
-    }, ttlSeconds, () => loader(explorer));
+    const explorer = chain === 'main' ? mainnetExplorer : bip110Explorer;
+    if (!explorer) throw new Error(`No explorer configured for ${chain}`);
+    return explorer;
 }
 
 function sendExplorerError(res: Response, error: unknown, operation: string) {
     const message = error instanceof Error ? error.message : String(error);
     logError('explorer.error', { requestId: res.locals.requestId, operation, error: message });
     return res.status(502).json({
-        error: `Explorer unavailable during ${operation}`,
+        error: `Chain data source unavailable during ${operation}`,
         detail: message
     });
 }
@@ -180,21 +164,24 @@ class BitcoinRpc {
     private host: string;
     private user: string;
     private pass: string;
+    private protocol: 'http:' | 'https:';
     
-    constructor(port: number, walletName?: string, host = '127.0.0.1', user = 'user', pass = 'password') {
+    constructor(port: number, walletName?: string, host = '127.0.0.1', user = 'user', pass = 'password', protocol: 'http:' | 'https:' = 'http:') {
         this.port = port;
         this.walletName = walletName;
         this.host = host;
         this.user = user;
         this.pass = pass;
+        this.protocol = protocol;
     }
 
     private getUrl(withWallet: boolean = true): string {
-        const auth = `${this.user}:${this.pass}`;
+        const auth = `${encodeURIComponent(this.user)}:${encodeURIComponent(this.pass)}`;
+        const host = this.host.includes(':') ? `[${this.host}]` : this.host;
         if (withWallet && this.walletName) {
-            return `http://${auth}@${this.host}:${this.port}/wallet/${this.walletName}`;
+            return `${this.protocol}//${auth}@${host}:${this.port}/wallet/${encodeURIComponent(this.walletName)}`;
         }
-        return `http://${auth}@${this.host}:${this.port}/`;
+        return `${this.protocol}//${auth}@${host}:${this.port}/`;
     }
 
     async call(method: string, params: any[] = []): Promise<any> {
@@ -256,6 +243,32 @@ class BitcoinRpc {
             throw new Error(`[RPC ${method}] ${err.message}`);
         }
     }
+}
+
+const createProductionRpc = (chain: ExplorerChain, walletName?: string): BitcoinRpc | null => {
+    const prefix = chain === 'main' ? 'BITCOIN' : 'BIP110';
+    const host = chain === 'main' ? BITCOIN_RPC_HOST : BIP110_RPC_HOST;
+    if (!host) return null;
+    if (/[/\s]/.test(host)) throw new Error(`${prefix}_RPC_HOST must be a hostname or IP address without a URL scheme or path`);
+    const port = Number(process.env[`${prefix}_RPC_PORT`] || 8332);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error(`${prefix}_RPC_PORT must be an integer from 1 to 65535`);
+    const user = process.env[`${prefix}_RPC_USER`] || '';
+    const pass = process.env[`${prefix}_RPC_PASSWORD`] || '';
+    if (!user || !pass) throw new Error(`${prefix}_RPC_USER and ${prefix}_RPC_PASSWORD are required when ${prefix}_RPC_HOST is configured`);
+    return new BitcoinRpc(port, walletName, host, user, pass);
+};
+
+const productionRootRpcs: Record<ExplorerChain, BitcoinRpc | null> = {
+    main: createProductionRpc('main'),
+    bip110: createProductionRpc('bip110')
+};
+const productionWatchRpcs: Record<ExplorerChain, BitcoinRpc | null> = {
+    main: createProductionRpc('main', 'watchonly'),
+    bip110: createProductionRpc('bip110', 'watchonly')
+};
+
+function getProductionRpc(chain: ExplorerChain, wallet = false): BitcoinRpc | null {
+    return wallet ? productionWatchRpcs[chain] : productionRootRpcs[chain];
 }
 
 // Separate RPC Clients to support Dual-Wallet Architecture:
@@ -360,6 +373,81 @@ app.get('/api/fees/coordinator', (_req: Request, res: Response) => {
     res.json(COORDINATOR_FEES);
 });
 
+function productionSourceId(chain: ExplorerChain): string {
+    const prefix = chain === 'main' ? 'BITCOIN' : 'BIP110';
+    const host = chain === 'main' ? BITCOIN_RPC_HOST : BIP110_RPC_HOST;
+    if (!host) return getMainnetExplorer(chain).baseUrl;
+    return `rpc:${host}:${process.env[`${prefix}_RPC_PORT`] || 8332}`;
+}
+
+function cachedProductionRead<T>(
+    chain: ExplorerChain,
+    operation: string,
+    parameters: unknown,
+    ttlSeconds: number,
+    loader: () => Promise<T>
+): Promise<T> {
+    return cachedExplorerRead(operation, {
+        network: NETWORK_MODE,
+        chain,
+        explorer: productionSourceId(chain),
+        parameters
+    }, ttlSeconds, loader);
+}
+
+async function getProductionUtxos(chain: ExplorerChain, address: string) {
+    const rpc = getProductionRpc(chain, true);
+    if (!rpc) return getMainnetExplorer(chain).getAddressUtxos(address);
+
+    try {
+        const info = await rpc.call('getdescriptorinfo', [`addr(${address})`]);
+        await rpc.call('importdescriptors', [[{
+            desc: info.descriptor,
+            timestamp: 'now',
+            internal: false,
+            label: 'split-contract'
+        }]]);
+    } catch (error: any) {
+        const expected = error.message.includes('already exists')
+            || error.message.includes('currently rescanning');
+        if (!expected) throw error;
+    }
+
+    const unspents = await rpc.call('listunspent', [0, 999999, [address]]);
+    return unspents.map((utxo: any) => ({
+        txid: utxo.txid,
+        vout: utxo.vout,
+        amount: Math.round(utxo.amount * 100_000_000),
+        confirmations: utxo.confirmations
+    }));
+}
+
+async function getProductionFees(chain: ExplorerChain) {
+    const rpc = getProductionRpc(chain);
+    if (!rpc) return getMainnetExplorer(chain).getRecommendedFees();
+
+    const [fastest, halfHour, hour, economy, mempool] = await Promise.all([
+        rpc.call('estimatesmartfee', [1]),
+        rpc.call('estimatesmartfee', [3]),
+        rpc.call('estimatesmartfee', [6]),
+        rpc.call('estimatesmartfee', [144]),
+        rpc.call('getmempoolinfo')
+    ]);
+    const minimumFee = Number(mempool?.mempoolminfee) * 100_000;
+    if (!Number.isFinite(minimumFee) || minimumFee <= 0) throw new Error('RPC returned an invalid mempool minimum fee');
+    const satPerVbyte = (estimate: any): number => {
+        const value = Number(estimate?.feerate) * 100_000;
+        return Number.isFinite(value) && value > 0 ? Math.max(value, minimumFee) : minimumFee;
+    };
+    return {
+        fastestFee: satPerVbyte(fastest),
+        halfHourFee: satPerVbyte(halfHour),
+        hourFee: satPerVbyte(hour),
+        economyFee: satPerVbyte(economy),
+        minimumFee
+    };
+}
+
 async function getTxConfirmations(
     txid: string | undefined,
     chain: 'main' | 'bip110',
@@ -367,7 +455,16 @@ async function getTxConfirmations(
 ): Promise<number> {
     if (!txid) return 0;
     if (mode === 'mainnet') {
-        return cachedMainnetRead(chain, 'confirmations', { txid }, EXPLORER_CACHE_TTL.confirmations, explorer => explorer.getTransactionConfirmations(txid));
+        return cachedProductionRead(chain, 'confirmations', { txid }, EXPLORER_CACHE_TTL.confirmations, async () => {
+            const rpc = getProductionRpc(chain);
+            if (!rpc) return getMainnetExplorer(chain).getTransactionConfirmations(txid);
+            try {
+                const transaction = await rpc.call('getrawtransaction', [txid, true]);
+                return transaction.confirmations || 0;
+            } catch {
+                return 0;
+            }
+        });
     }
     // Regtest
     try {
@@ -381,7 +478,10 @@ async function getTxConfirmations(
 
 async function getRawTransaction(txid: string, chain: ExplorerChain): Promise<string> {
     if (NETWORK_MODE === 'mainnet') {
-        return cachedMainnetRead(chain, 'raw-transaction', { txid }, EXPLORER_CACHE_TTL.rawTransaction, explorer => explorer.getRawTransaction(txid));
+        return cachedProductionRead(chain, 'raw-transaction', { txid }, EXPLORER_CACHE_TTL.rawTransaction, async () => {
+            const rpc = getProductionRpc(chain);
+            return rpc ? rpc.call('getrawtransaction', [txid, false]) : getMainnetExplorer(chain).getRawTransaction(txid);
+        });
     }
     const rpc = chain === 'bip110' ? bip110MinerRpc : mainMinerRpc;
     return rpc.call('getrawtransaction', [txid, false]);
@@ -398,10 +498,15 @@ async function assertConfirmedChainExclusiveOutpoint(txid: string, vout: number,
         const raw = await getRawTransaction(txid, chain);
         const transaction = bitcoin.Transaction.fromHex(raw);
         if (!Number.isSafeInteger(vout) || vout < 0 || vout >= transaction.outs.length) throw new Error('Invalid split output index');
-        const network = bitcoin.networks.bitcoin;
-        const address = bitcoin.address.fromOutputScript(transaction.outs[vout].script, network);
-        const oppositeUtxos = await cachedMainnetRead(opposite, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, explorer => explorer.getAddressUtxos(address));
-        oppositeHasOutpoint = oppositeUtxos.some(output => output.txid === txid && output.vout === vout);
+        const oppositeRpc = getProductionRpc(opposite);
+        if (oppositeRpc) {
+            oppositeHasOutpoint = (await oppositeRpc.call('gettxout', [txid, vout, true])) !== null;
+        } else {
+            const network = bitcoin.networks.bitcoin;
+            const address = bitcoin.address.fromOutputScript(transaction.outs[vout].script, network);
+            const oppositeUtxos = await cachedProductionRead(opposite, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, () => getProductionUtxos(opposite, address));
+            oppositeHasOutpoint = oppositeUtxos.some((output: { txid: string; vout: number }) => output.txid === txid && output.vout === vout);
+        }
     }
     if (oppositeHasOutpoint) throw new Error(`Outpoint ${txid}:${vout} is still unspent on ${opposite} and is replayable`);
 }
@@ -949,7 +1054,7 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
 
     if (mode === 'mainnet') {
         try {
-            const utxos = await cachedMainnetRead(chain, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, explorer => explorer.getAddressUtxos(address));
+            const utxos = await cachedProductionRead(chain, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, () => getProductionUtxos(chain, address));
             return res.json({ address, chain, utxos });
         } catch (err: any) {
             return sendExplorerError(res, err, `${chain} UTXO lookup`);
@@ -1079,7 +1184,10 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 
     if (mode === 'mainnet') {
         try {
-            const txid = await getMainnetExplorer(chain).broadcastTransaction(hex);
+            const rpc = getProductionRpc(chain);
+            const txid = rpc
+                ? await rpc.call('sendrawtransaction', [hex])
+                : await getMainnetExplorer(chain).broadcastTransaction(hex);
             logInfo('transaction.broadcast', { requestId: res.locals.requestId, chain, networkMode: mode, txid });
             return res.json({ success: true, txid });
         } catch (err: any) {
@@ -1111,8 +1219,14 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
 app.get('/api/node/info', async (req: Request, res: Response) => {
     if (NETWORK_MODE === 'mainnet') {
         const [mainResult, bip110Result] = await Promise.allSettled([
-            Promise.resolve().then(() => cachedMainnetRead('main', 'chain-tip', {}, EXPLORER_CACHE_TTL.tip, explorer => explorer.getTipHeight())),
-            Promise.resolve().then(() => cachedMainnetRead('bip110', 'chain-tip', {}, EXPLORER_CACHE_TTL.tip, explorer => explorer.getTipHeight()))
+            cachedProductionRead('main', 'chain-tip', {}, EXPLORER_CACHE_TTL.tip, async () => {
+                const rpc = getProductionRpc('main');
+                return rpc ? rpc.call('getblockcount') : getMainnetExplorer('main').getTipHeight();
+            }),
+            cachedProductionRead('bip110', 'chain-tip', {}, EXPLORER_CACHE_TTL.tip, async () => {
+                const rpc = getProductionRpc('bip110');
+                return rpc ? rpc.call('getblockcount') : getMainnetExplorer('bip110').getTipHeight();
+            })
         ]);
         const mainError = mainResult.status === 'rejected'
             ? (mainResult.reason instanceof Error ? mainResult.reason.message : String(mainResult.reason))
@@ -1175,7 +1289,7 @@ app.get('/api/fees/recommended', async (req: Request, res: Response) => {
     }
 
     try {
-        const fees = await cachedMainnetRead(chain, 'recommended-fees', {}, EXPLORER_CACHE_TTL.fees, explorer => explorer.getRecommendedFees());
+        const fees = await cachedProductionRead(chain, 'recommended-fees', {}, EXPLORER_CACHE_TTL.fees, () => getProductionFees(chain));
         return res.json(fees);
     } catch (err: any) {
         return sendExplorerError(res, err, `${chain} fee estimate`);
@@ -1188,13 +1302,19 @@ async function startServer() {
     if (NETWORK_MODE === 'regtest') {
         await initNodeWallets();
     } else {
-        if (!bip110Explorer) {
-            throw new Error('BIP110_EXPLORER_URL must be configured in mainnet mode');
-        }
-        await Promise.all([
-            mainnetExplorer.assertHealthy('Bitcoin'),
-            bip110Explorer.assertHealthy('BIP110')
-        ]);
+        if (!mainnetExplorer && !getProductionRpc('main')) throw new Error('A Bitcoin explorer or RPC endpoint is required in mainnet mode');
+        if (!bip110Explorer && !getProductionRpc('bip110')) throw new Error('A BIP110 explorer or RPC endpoint is required in mainnet mode');
+        await Promise.all((['main', 'bip110'] as ExplorerChain[]).map(async chain => {
+            const rpc = getProductionRpc(chain);
+            if (rpc) {
+                await Promise.all([rpc.call('getblockcount'), getProductionFees(chain)]);
+                // Trigger creation/loading of the persistent descriptor wallet.
+                await getProductionRpc(chain, true)!.call('getwalletinfo');
+                console.log(`[BOOT] ${chain} RPC health check passed.`);
+            } else {
+                await getMainnetExplorer(chain).assertHealthy(chain === 'main' ? 'Bitcoin' : 'BIP110');
+            }
+        }));
         console.log("[BOOT] Production Mainnet mode: skipping Regtest wallet initialization.");
     }
 
