@@ -129,7 +129,7 @@ http://localhost:3000
 
 ## Production Mainnet Explorer Configuration
 
-Mainnet mode fails closed unless both explorers expose a Mempool-compatible API, including chain height, transaction status, address UTXOs, raw transaction broadcast, and recommended fees.
+Mainnet mode fails closed unless both explorers expose an Esplora-compatible API, including chain height, transaction status, address UTXOs, and raw transaction broadcast. Recommended fees may be supplied by either Mempool's `/api/v1/fees/recommended` endpoint or Esplora's `/api/fee-estimates` endpoint.
 Explorer reads are shared through Redis so repeated requests from different clients do not repeatedly hit the upstream APIs. `npm run server:mainnet` starts the bundled Redis service automatically.
 
 ```bash

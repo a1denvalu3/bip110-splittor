@@ -158,6 +158,7 @@ export class MempoolExplorerClient {
     }
 
     async getRecommendedFees(): Promise<RecommendedFees> {
+        let mempoolError: unknown;
         try {
             const response = await this.http.get(this.api('/v1/fees/recommended'), {
                 timeout: this.timeoutMs
@@ -175,8 +176,44 @@ export class MempoolExplorerClient {
             }
             return fees;
         } catch (error) {
-            if (error instanceof ExplorerRequestError) throw error;
-            throw new ExplorerRequestError('Recommended-fee lookup', error);
+            mempoolError = error;
+        }
+
+        try {
+            const response = await this.http.get(this.api('/fee-estimates'), {
+                timeout: this.timeoutMs
+            });
+            const estimates = response.data;
+            if (!estimates || typeof estimates !== 'object' || Array.isArray(estimates)) {
+                throw new Error('Explorer returned invalid fee estimates');
+            }
+
+            const feeForTarget = (target: number): number => {
+                const value = Number(estimates[String(target)]);
+                if (!Number.isFinite(value) || value <= 0) {
+                    throw new Error(`Explorer returned an invalid ${target}-block fee estimate`);
+                }
+                return value;
+            };
+
+            return {
+                fastestFee: feeForTarget(1),
+                halfHourFee: feeForTarget(3),
+                hourFee: feeForTarget(6),
+                economyFee: feeForTarget(144),
+                minimumFee: feeForTarget(1008)
+            };
+        } catch (esploraError) {
+            const mempoolDetail = mempoolError instanceof Error
+                ? mempoolError.message
+                : String(mempoolError);
+            const esploraDetail = esploraError instanceof Error
+                ? esploraError.message
+                : String(esploraError);
+            throw new ExplorerRequestError(
+                'Recommended-fee lookup',
+                new Error(`Mempool endpoint failed: ${mempoolDetail}; Esplora endpoint failed: ${esploraDetail}`)
+            );
         }
     }
 

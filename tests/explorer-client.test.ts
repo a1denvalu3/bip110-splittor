@@ -196,6 +196,66 @@ describe('Production Mempool explorer client', () => {
         ]);
     });
 
+    it('falls back to Esplora fee estimates and maps confirmation targets', async () => {
+        const requests: string[] = [];
+        const http = {
+            get: async (url: string) => {
+                requests.push(url);
+                if (url.endsWith('/v1/fees/recommended')) {
+                    throw {
+                        message: 'Request failed with status code 404',
+                        response: { status: 404, data: 'not found' }
+                    };
+                }
+                return {
+                    data: {
+                        '1': 9.5,
+                        '3': 7.25,
+                        '6': 4.5,
+                        '144': 2.25,
+                        '1008': 1.1
+                    }
+                };
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http);
+
+        expect(await client.getRecommendedFees()).to.deep.equal({
+            fastestFee: 9.5,
+            halfHourFee: 7.25,
+            hourFee: 4.5,
+            economyFee: 2.25,
+            minimumFee: 1.1
+        });
+        expect(requests).to.deep.equal([
+            'https://explorer.example/api/v1/fees/recommended',
+            'https://explorer.example/api/fee-estimates'
+        ]);
+    });
+
+    it('reports both fee endpoint failures', async () => {
+        const http = {
+            get: async (url: string) => {
+                if (url.endsWith('/v1/fees/recommended')) {
+                    throw new Error('mempool endpoint unavailable');
+                }
+                return { data: { '1': 5 } };
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const client = new MempoolExplorerClient('https://explorer.example', http);
+
+        try {
+            await client.getRecommendedFees();
+            expect.fail('Expected both fee endpoints to fail');
+        } catch (error) {
+            expect(error).to.be.instanceOf(ExplorerRequestError);
+            expect((error as Error).message).to.contain('Mempool endpoint failed: mempool endpoint unavailable');
+            expect((error as Error).message).to.contain('Esplora endpoint failed: Explorer returned an invalid 3-block fee estimate');
+        }
+    });
+
     it('propagates HTTP status and text response details through ExplorerRequestError', async () => {
         const http = {
             get: async () => {
